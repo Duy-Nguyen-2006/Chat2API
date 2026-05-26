@@ -157,7 +157,7 @@ export function About() {
         ...current,
         phase: 'error',
         error: getUpdateErrorMessage(error, 'Update check failed'),
-      })
+      }))
     }
   }
 
