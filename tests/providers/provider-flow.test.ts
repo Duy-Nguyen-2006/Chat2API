@@ -10,6 +10,7 @@ import { kimiConfig } from '../../src/main/providers/builtin/kimi.ts'
 import { minimaxConfig } from '../../src/main/providers/builtin/minimax.ts'
 import { mimoConfig } from '../../src/main/providers/builtin/mimo.ts'
 import { qwenConfig } from '../../src/main/providers/builtin/qwen.ts'
+import { qwenAiConfig } from '../../src/main/providers/builtin/qwen-ai.ts'
 import {
   DEEPSEEK_PRIMARY_MODELS,
   DEFAULT_DEEPSEEK_MODEL_MAPPINGS,
@@ -278,6 +279,107 @@ test('domestic Qwen models match the web chat model ids captured from HAR', () =
   assert.match(addProviderSource, /'Qwen3\.6': 'Qwen'/)
   assert.deepEqual(zh.qwen.models, expectedMappings)
   assert.deepEqual(en.qwen.models, expectedMappings)
+})
+
+test('Qwen AI defaults keep only the filtered current web model set', () => {
+  const expectedModels = [
+    'Qwen3.7-Max',
+    'Qwen3.6-Plus',
+    'Qwen3.6-35B-A3B',
+    'Qwen3.6-27B',
+    'Qwen3-Coder',
+  ]
+  const expectedMappings = {
+    'Qwen3.7-Max': 'qwen3.7-max',
+    'Qwen3.6-Plus': 'qwen3.6-plus',
+    'Qwen3.6-35B-A3B': 'qwen3.6-35b-a3b',
+    'Qwen3.6-27B': 'qwen3.6-27b',
+    'Qwen3-Coder': 'qwen3-coder-plus',
+  }
+
+  assert.deepEqual(qwenAiConfig.supportedModels, expectedModels)
+  assert.deepEqual(qwenAiConfig.modelMappings, expectedMappings)
+
+  for (const removedModel of [
+    'Qwen3.7-Max-Preview',
+    'Qwen3.7-Plus-Preview',
+    'Qwen3.6-Max-Preview',
+    'Qwen3.6-Plus-Preview',
+    'Qwen3.5-Plus',
+    'Qwen3-Max',
+    'Qwen3-235B-A22B-2507',
+    'Qwen3-VL-235B-A22B',
+    'Qwen3-Omni-Flash',
+    'Qwen2.5-Max',
+  ]) {
+    assert.equal(qwenAiConfig.modelMappings?.[removedModel], undefined, removedModel)
+  }
+
+  const qwenAiAdapterSource = readFileSync(join(root, 'src/main/proxy/adapters/qwen-ai.ts'), 'utf8')
+  assert.match(qwenAiAdapterSource, /qwen:\s*'qwen3\.7-max'/)
+  assert.match(qwenAiAdapterSource, /qwen3:\s*'qwen3\.7-max'/)
+  assert.match(qwenAiAdapterSource, /'qwen3\.7':\s*'qwen3\.7-max'/)
+  assert.match(qwenAiAdapterSource, /'qwen3\.6':\s*'qwen3\.6-plus'/)
+  assert.match(qwenAiAdapterSource, /'qwen3-coder':\s*'qwen3-coder-plus'/)
+  assert.doesNotMatch(qwenAiAdapterSource, /'qwen3\.5':/)
+  assert.doesNotMatch(qwenAiAdapterSource, /'qwen3-vl':/)
+  assert.doesNotMatch(qwenAiAdapterSource, /'qwen3-omni':/)
+  assert.doesNotMatch(qwenAiAdapterSource, /'qwen2\.5':/)
+})
+
+test('provider docs cover every built-in provider and Qwen AI manual model additions', () => {
+  const providerDocs = [
+    'deepseek',
+    'glm',
+    'kimi',
+    'minimax',
+    'mimo',
+    'perplexity',
+    'qwen',
+    'qwen-ai',
+    'zai',
+  ]
+
+  for (const providerId of providerDocs) {
+    const doc = readFileSync(join(root, 'docs/providers', `${providerId}.md`), 'utf8')
+    assert.match(doc, new RegExp(`Provider ID.*${providerId}|供应商 ID.*${providerId}`))
+    assert.match(doc, /默认模型|Default models/)
+    assert.match(doc, /适配|Tutorial|教程/)
+  }
+
+  const index = readFileSync(join(root, 'docs/providers/README.md'), 'utf8')
+  for (const providerId of providerDocs) {
+    assert.match(index, new RegExp(`\\(${providerId}\\.md\\)`))
+  }
+
+  const qwenAiDoc = readFileSync(join(root, 'docs/providers/qwen-ai.md'), 'utf8')
+  const manualModels = {
+    'Qwen3.7-Max-Preview': 'qwen-latest-series-invite-beta-v24',
+    'Qwen3.7-Plus-Preview': 'qwen-latest-series-invite-beta-v16',
+    'Qwen3.6-Max-Preview': 'qwen3.6-max-preview',
+    'Qwen3.6-Plus-Preview': 'qwen3.6-plus-preview',
+    'Qwen3.5-Plus': 'qwen3.5-plus',
+    'Qwen3.5-Omni-Plus': 'qwen3.5-omni-plus',
+    'Qwen3.5-Flash': 'qwen3.5-flash',
+    'Qwen3.5-Max-Preview': 'qwen3.5-max-2026-03-08',
+    'Qwen3.5-397B-A17B': 'qwen3.5-397b-a17b',
+    'Qwen3.5-122B-A10B': 'qwen3.5-122b-a10b',
+    'Qwen3.5-Omni-Flash': 'qwen3.5-omni-flash',
+    'Qwen3.5-27B': 'qwen3.5-27b',
+    'Qwen3.5-35B-A3B': 'qwen3.5-35b-a3b',
+    'Qwen3-Max': 'qwen3-max-2026-01-23',
+    'Qwen3-235B-A22B-2507 / Qwen2.5-Plus': 'qwen-plus-2025-07-28',
+    'Qwen3-VL-235B-A22B': 'qwen3-vl-plus',
+    'Qwen3-Omni-Flash': 'qwen3-omni-flash-2025-12-01',
+    'Qwen2.5-Max': 'qwen-max-latest',
+  }
+
+  assert.match(qwenAiDoc, /供应商管理/)
+  assert.match(qwenAiDoc, /模型管理/)
+  for (const [displayName, actualModelId] of Object.entries(manualModels)) {
+    assert.match(qwenAiDoc, new RegExp(displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.match(qwenAiDoc, new RegExp(actualModelId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
 })
 
 test('Mimo model names and conversation flow match Xiaomi AI Studio web requests', () => {

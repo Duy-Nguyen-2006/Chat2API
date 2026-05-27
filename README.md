@@ -56,8 +56,10 @@
 | Mimo             | Cookie        | Yes   | MiMo-V2.5-Pro, MiMo-V2.5, MiMo-V2-Flash                                                                                                                                                                                                         |
 | Perplexity       | Cookie        | Yes   | Auto, Turbo, PPLX-Pro, GPT-5, Gemini-2.5-Pro, Claude-Sonnet-4, Claude-Opus-4, Nemotron                                                                                                                                                         |
 | Qwen (CN)        | SSO Ticket    | Yes   | Qwen3.6, Qwen3.7-Max, Qwen3.5-Flash, Qwen3-Max, Qwen3-Max-Thinking-Preview, Qwen3-Coder                                                                                                                                                         |
-| Qwen AI (Global) | JWT Token     | Yes   | Qwen3.6-Plus, Qwen3.5-Plus, Qwen3.5-Omni-Plus, Qwen3.5-Flash, Qwen3.5-Max-Preview, Qwen3.6-Plus-Preview, Qwen3.5-397B-A17B, Qwen3.5-122B-A10B, Qwen3.5-Omni-Flash, Qwen3.5-27B, Qwen3.5-35B-A3B, Qwen3-Max, Qwen3-235B-A22B-2507, Qwen3-Coder, Qwen3-VL-235B-A22B, Qwen3-Omni-Flash, Qwen2.5-Max |
+| Qwen AI (Global) | JWT Token     | Yes   | Qwen3.7-Max, Qwen3.6-Plus, Qwen3.6-35B-A3B, Qwen3.6-27B, Qwen3-Coder                                                                                                                                                                           |
 | Z.ai             | JWT Token     | Yes   | GLM-5-Turbo, glm-5, glm-4.7, glm-4.6v, glm-4.6, glm-4.5v, glm-4.5-air                                                                                                                                                                          |
+
+Provider adaptation notes and manual model-addition guides are in [docs/providers](docs/providers/README.md).
 
 ## 📥 Installation
 
