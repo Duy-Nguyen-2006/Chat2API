@@ -17,9 +17,14 @@ fi
 export HOST="${HOST:-localhost}"
 export PORT="${PORT:-8080}"
 
-if [ -z "${CHATGPT_ACCESS_TOKEN:-}" ]; then
-  echo "[run.sh] Warning: CHATGPT_ACCESS_TOKEN is not set."
-  echo "         Copy .env.example to .env and add your token."
+if [ -z "${CHATGPT_ACCESS_TOKEN:-}" ] && [ -z "${COOKIES_FILE:-}" ]; then
+  echo "[run.sh] Warning: neither CHATGPT_ACCESS_TOKEN nor COOKIES_FILE is set."
+  echo "         Copy .env.example to .env and configure credentials."
+fi
+
+if [ "${STORAGE_BACKEND:-json}" = "sqlite" ] && [ -z "${SQLITE_PATH:-}" ]; then
+  export SQLITE_PATH="${STORAGE_DIR:-data}/chat2api.db"
+  echo "[run.sh] SQLite path defaulted to ${SQLITE_PATH}"
 fi
 
 echo "[run.sh] Starting Chat2API at http://${HOST}:${PORT}"
