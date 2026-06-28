@@ -1,25 +1,7 @@
-# Build
 bin/
-
-# Environment
 .env
 .env.local
-.env.*.local
-
-# OS
 .DS_Store
-Thumbs.db
-
-# IDE
 .idea/
 .vscode/
-*.swp
-*.swo
-.codex/
-CLAUDE.md
-
-# Logs
 *.log
-
-# Codemod
-.codemod/node_modules/
