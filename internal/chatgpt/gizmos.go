@@ -36,52 +36,64 @@ func extractGizmoID(model string) string {
 	return ""
 }
 
-func (c *Client) ListGizmos(ctx context.Context) (GizmoList, error) {
-	seen := map[string]Gizmo{}
+// ListGizmosRaw performs all gizmo discovery requests and returns the first
+// non-error response (callers can use it directly when retries aren't needed).
+// It mirrors ListGizmos but returns the raw upstream response from the first
+// successful endpoint.
+func (c *Client) ListGizmosRaw(ctx context.Context) (*http.Response, error) {
 	sources := []string{
 		"/backend-api/gizmos/pinned",
 		"/backend-api/gizmos/snorlax/sidebar",
 		"/backend-api/gizmos/bootstrap",
 	}
-
+	var lastErr error
 	for _, path := range sources {
-		if err := c.collectGizmos(ctx, path, seen); err != nil {
-			// best-effort: pinned/sidebar are enough for most workspaces
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header = c.buildHeaders(nil)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
 			continue
 		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("%s HTTP %d", path, resp.StatusCode)
+			continue
+		}
+		return resp, nil
 	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no gizmo source responded")
+	}
+	return nil, lastErr
+}
 
+// DecodeGizmoList walks the response body for any nested gizmo-id keys and
+// returns the deduped GizmoList. The caller must close resp.Body.
+func DecodeGizmoList(resp *http.Response) (GizmoList, error) {
+	seen := map[string]Gizmo{}
+	var payload any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return GizmoList{}, err
+	}
+	walkGizmos(payload, seen)
 	data := make([]Gizmo, 0, len(seen))
 	for _, g := range seen {
 		data = append(data, g)
 	}
-
 	return GizmoList{Object: "list", Data: data}, nil
 }
 
-func (c *Client) collectGizmos(ctx context.Context, path string, seen map[string]Gizmo) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+func (c *Client) ListGizmos(ctx context.Context) (GizmoList, error) {
+	resp, err := c.ListGizmosRaw(ctx)
 	if err != nil {
-		return err
-	}
-	req.Header = c.buildHeaders(nil)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
+		return GizmoList{}, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s HTTP %d", path, resp.StatusCode)
-	}
-
-	var payload any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return err
-	}
-	walkGizmos(payload, seen)
-	return nil
+	return DecodeGizmoList(resp)
 }
 
 func walkGizmos(v any, seen map[string]Gizmo) {

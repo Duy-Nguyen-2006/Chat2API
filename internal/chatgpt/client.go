@@ -71,6 +71,10 @@ func NewClientWith(accessToken, accountID, cookie string, fp httpclient.BrowserF
 // Fingerprint returns the browser fingerprint in use.
 func (c *Client) Fingerprint() httpclient.BrowserFingerprint { return c.fp }
 
+// AccountIDForRequest returns the chatgpt account id this client was last
+// pointed at. The admin handler uses it to default the workspace selector.
+func (c *Client) AccountIDForRequest() string { return c.accountID }
+
 // HTTPClient returns the underlying Doer (for connection reuse by callers).
 func (c *Client) HTTPClient() httpclient.Doer { return c.http }
 

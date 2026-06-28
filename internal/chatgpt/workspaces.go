@@ -42,28 +42,26 @@ type accountsCheckResponse struct {
 	} `json:"accounts"`
 }
 
-func (c *Client) ListWorkspaces(ctx context.Context) (WorkspaceList, error) {
+// ListWorkspacesRaw performs the accounts-check request and returns the
+// upstream HTTP response. The caller is responsible for closing the body
+// and checking the status code. Used by the server layer so retries can
+// reuse the response before deciding to fall back to a different account.
+func (c *Client) ListWorkspacesRaw(ctx context.Context) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+accountsCheckPath, nil)
 	if err != nil {
-		return WorkspaceList{}, err
+		return nil, err
 	}
 	req.Header = c.buildHeaders(nil)
+	return c.http.Do(req)
+}
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return WorkspaceList{}, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return WorkspaceList{}, fmt.Errorf("accounts/check HTTP %d: %s", resp.StatusCode, readLimitedBody(resp.Body))
-	}
-
+// DecodeWorkspaceList converts an accounts-check response into the public
+// WorkspaceList shape. The caller must close resp.Body afterwards.
+func DecodeWorkspaceList(resp *http.Response) (WorkspaceList, error) {
 	var check accountsCheckResponse
 	if err := json.NewDecoder(resp.Body).Decode(&check); err != nil {
 		return WorkspaceList{}, err
 	}
-
 	workspaces := make([]Workspace, 0, len(check.Accounts))
 	for key, entry := range check.Accounts {
 		if key == "default" {
@@ -100,18 +98,40 @@ func (c *Client) ListWorkspaces(ctx context.Context) (WorkspaceList, error) {
 			Structure:   acc.Structure,
 			Plan:        acc.PlanType,
 			Personal:    acc.Structure == "personal",
-			IsDefault:   accountID == c.accountID,
-			IsCurrent:   accountID == c.accountID,
 			Deactivated: acc.IsDeactivated,
 			CanAccess:   entry.CanAccessWithSession,
 		})
 	}
 
 	return WorkspaceList{
-		Object:           "list",
-		CurrentAccountID: c.accountID,
-		Data:             workspaces,
+		Object: "list",
+		Data:   workspaces,
 	}, nil
+}
+
+// ListWorkspaces is a convenience wrapper around ListWorkspacesRaw + decode.
+// Retained for callers that don't need retry control.
+func (c *Client) ListWorkspaces(ctx context.Context) (WorkspaceList, error) {
+	resp, err := c.ListWorkspacesRaw(ctx)
+	if err != nil {
+		return WorkspaceList{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return WorkspaceList{}, fmt.Errorf("accounts/check HTTP %d: %s", resp.StatusCode, readLimitedBody(resp.Body))
+	}
+	list, err := DecodeWorkspaceList(resp)
+	if err != nil {
+		return WorkspaceList{}, err
+	}
+	// Backfill CurrentAccountID with the client's selection so callers that
+	// already migrated to ListWorkspaces keep getting the same shape.
+	list.CurrentAccountID = c.accountID
+	for i := range list.Data {
+		list.Data[i].IsDefault = list.Data[i].ID == c.accountID
+		list.Data[i].IsCurrent = list.Data[i].ID == c.accountID
+	}
+	return list, nil
 }
 
 func (c *Client) WithAccountID(accountID string) *Client {
