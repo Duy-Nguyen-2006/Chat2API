@@ -1,9 +1,14 @@
 package chatgpt
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
+)
 
 func TestRequirementsTokenPrefix(t *testing.T) {
-	token := requirementsToken(browserHeaders["User-Agent"])
+	ua := httpclient.NewFingerprint().UserAgent
+	token := requirementsToken(ua)
 	if len(token) < 10 {
 		t.Fatalf("token too short: %q", token)
 	}
@@ -13,7 +18,7 @@ func TestRequirementsTokenPrefix(t *testing.T) {
 }
 
 func TestAnswerTokenSolves(t *testing.T) {
-	ua := browserHeaders["User-Agent"]
+	ua := httpclient.NewFingerprint().UserAgent
 	cfg := newPowConfig(ua)
 	seed := "0.12345"
 	diff := "0fffff"

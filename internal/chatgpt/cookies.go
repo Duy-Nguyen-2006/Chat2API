@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
 )
 
 type browserCookie struct {
@@ -108,10 +110,22 @@ func fetchAccessToken(cookieHeader string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", browserHeaders["User-Agent"])
+	fp := httpclient.NewFingerprint()
+	req.Header.Set("User-Agent", fp.UserAgent)
 	req.Header.Set("Cookie", cookieHeader)
 
-	resp, err := http.DefaultClient.Do(req)
+	// Use the TLS-impersonating client so the session endpoint isn't blocked
+	// by Cloudflare when cookies are the only credential.
+	var doer httpclient.Doer
+	opts := httpclient.DefaultOptions()
+	opts.TimeoutSeconds = 30
+	c, err := httpclient.New(opts)
+	if err != nil {
+		doer = http.DefaultClient
+	} else {
+		doer = c
+	}
+	resp, err := doer.Do(req)
 	if err != nil {
 		return "", err
 	}

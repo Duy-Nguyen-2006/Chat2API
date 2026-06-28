@@ -9,39 +9,70 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
 )
 
 const baseURL = "https://chatgpt.com"
 
-var browserHeaders = map[string]string{
-	"Accept":          "*/*",
-	"Accept-Language": "en-US,en;q=0.9",
-	"Content-Type":    "application/json",
-	"Origin":          baseURL,
-	"Referer":         baseURL + "/",
-	"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-	"oai-language":    "en-US",
-}
-
+// Client talks to the ChatGPT web backend. It uses a TLS-fingerprint-
+// impersonating Doer (bogdanfinn/tls-client) to pass Cloudflare, and carries
+// a BrowserFingerprint so the request headers match a real browser session.
 type Client struct {
 	accessToken string
 	accountID   string
 	cookie      string
-	deviceID    string
-	http        *http.Client
+	fp          httpclient.BrowserFingerprint
+	http        httpclient.Doer
 }
 
+// NewClient builds a Client with the default Chrome-impersonating TLS client
+// and a freshly generated browser fingerprint. The legacy deviceID argument
+// overrides fp.DeviceID when non-empty (backward compatibility).
+//
+// For finer control (proxy, custom profile, shared fingerprint) use NewClientWith.
 func NewClient(accessToken, accountID, cookie, deviceID string) *Client {
+	fp := httpclient.NewFingerprint()
+	if deviceID != "" {
+		fp.DeviceID = deviceID
+	}
+	var doer httpclient.Doer
+	opts := httpclient.DefaultOptions()
+	c, err := httpclient.New(opts)
+	if err != nil {
+		// New only fails on invalid options; the defaults are valid, so this
+		// should never happen. Fall back to a stdlib client rather than panic
+		// so a misconfigured environment still degrades gracefully.
+		doer = http.DefaultClient
+	} else {
+		doer = c
+	}
 	return &Client{
 		accessToken: accessToken,
 		accountID:   accountID,
 		cookie:      cookie,
-		deviceID:    deviceID,
-		http: &http.Client{
-			Timeout: 0,
-		},
+		fp:          fp,
+		http:        doer,
 	}
 }
+
+// NewClientWith builds a Client from explicit transport + fingerprint, used
+// by the account pool so each account shares one fingerprint across requests.
+func NewClientWith(accessToken, accountID, cookie string, fp httpclient.BrowserFingerprint, doer httpclient.Doer) *Client {
+	return &Client{
+		accessToken: accessToken,
+		accountID:   accountID,
+		cookie:      cookie,
+		fp:          fp,
+		http:        doer,
+	}
+}
+
+// Fingerprint returns the browser fingerprint in use.
+func (c *Client) Fingerprint() httpclient.BrowserFingerprint { return c.fp }
+
+// HTTPClient returns the underlying Doer (for connection reuse by callers).
+func (c *Client) HTTPClient() httpclient.Doer { return c.http }
 
 type Message struct {
 	Role    string `json:"role"`
@@ -58,26 +89,39 @@ type ChatRequest struct {
 	ApprovalOnly    *pendingApproval `json:"-"`
 }
 
+// sentinelRequirements mirrors the /backend-api/sentinel/chat-requirements
+// response. Turnstile/SO tokens are populated when the upstream requires them.
 type sentinelRequirements struct {
-	Token       string `json:"token"`
+	Token      string `json:"token"`
+	SOtoken    string `json:"so_token"`
 	ProofOfWork struct {
 		Required   bool   `json:"required"`
 		Seed       string `json:"seed"`
 		Difficulty string `json:"difficulty"`
 	} `json:"proofofwork"`
+	Turnstile struct {
+		Required bool   `json:"required"`
+		DX       string `json:"dx"`
+	} `json:"turnstile"`
+}
+
+// sentinelTokens is the resolved token bundle attached to a conversation call.
+type sentinelTokens struct {
+	chat       string
+	proof      string
+	turnstile  string
+	so         string
 }
 
 func (c *Client) buildHeaders(extra map[string]string) http.Header {
 	h := make(http.Header)
-	for k, v := range browserHeaders {
-		h.Set(k, v)
-	}
+	h.Set("Accept", "*/*")
+	h.Set("Content-Type", "application/json")
+	// Apply the full client-hint + browser header set from the fingerprint.
+	c.fp.Apply(h)
 	h.Set("Authorization", "Bearer "+c.accessToken)
 	if c.accountID != "" {
 		h.Set("ChatGPT-Account-ID", c.accountID)
-	}
-	if c.deviceID != "" {
-		h.Set("oai-device-id", c.deviceID)
 	}
 	if c.cookie != "" {
 		h.Set("Cookie", c.cookie)
@@ -88,40 +132,50 @@ func (c *Client) buildHeaders(extra map[string]string) http.Header {
 	return h
 }
 
-func (c *Client) chatRequirements(ctx context.Context) (chatToken, proofToken string, err error) {
-	ua := browserHeaders["User-Agent"]
+// chatRequirements resolves the sentinel token bundle (chat + proof-of-work +
+// turnstile + SO) required before posting a conversation.
+func (c *Client) chatRequirements(ctx context.Context) (*sentinelTokens, error) {
+	ua := c.fp.UserAgent
 	reqBody, _ := json.Marshal(map[string]string{"p": requirementsToken(ua)})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/backend-api/sentinel/chat-requirements", bytes.NewReader(reqBody))
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	req.Header = c.buildHeaders(nil)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("chat-requirements HTTP %d: %s", resp.StatusCode, readLimitedBody(resp.Body))
+		return nil, fmt.Errorf("chat-requirements HTTP %d: %s", resp.StatusCode, readLimitedBody(resp.Body))
 	}
 
 	var out sentinelRequirements
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", "", err
+		return nil, err
 	}
 
-	chatToken = out.Token
+	tokens := &sentinelTokens{chat: out.Token, so: out.SOtoken}
+
 	if out.ProofOfWork.Required {
-		proofToken, ok := answerToken(out.ProofOfWork.Seed, out.ProofOfWork.Difficulty, ua)
+		proof, ok := answerToken(out.ProofOfWork.Seed, out.ProofOfWork.Difficulty, ua)
 		if !ok {
-			return "", "", fmt.Errorf("failed to solve proof of work")
+			return nil, fmt.Errorf("failed to solve proof of work")
 		}
-		return chatToken, proofToken, nil
+		tokens.proof = proof
 	}
-	return chatToken, "", nil
+	// Solve Turnstile only when the upstream explicitly demands it; solving is
+	// best-effort and a missing token degrades to the chat token only.
+	if out.Turnstile.Required && out.Turnstile.DX != "" {
+		if ts := solveTurnstileToken(out.Turnstile.DX, requirementsToken(ua)); ts != "" {
+			tokens.turnstile = ts
+		}
+	}
+	return tokens, nil
 }
 
 func readLimitedBody(r io.Reader) string {
@@ -215,13 +269,13 @@ func (c *Client) buildConversationBody(req ChatRequest) map[string]any {
 	body := map[string]any{
 		"action": "next",
 		"client_contextual_info": map[string]any{
-			"is_dark_mode":        false,
-			"time_since_loaded":   120,
-			"page_height":         900,
-			"page_width":          1200,
-			"pixel_ratio":         1.5,
-			"screen_height":       1080,
-			"screen_width":        1920,
+			"is_dark_mode":      false,
+			"time_since_loaded": 120,
+			"page_height":       900,
+			"page_width":        1200,
+			"pixel_ratio":       1.5,
+			"screen_height":     1080,
+			"screen_width":      1920,
 		},
 		"messages":                      messages,
 		"model":                         model,
@@ -241,18 +295,29 @@ func (c *Client) buildConversationBody(req ChatRequest) map[string]any {
 	return body
 }
 
+// conversationHeaders builds the SSE request headers carrying all resolved
+// sentinel tokens.
+func (c *Client) conversationHeaders(tokens *sentinelTokens) http.Header {
+	extra := map[string]string{"Accept": "text/event-stream"}
+	if tokens.chat != "" {
+		extra["OpenAI-Sentinel-Chat-Requirements-Token"] = tokens.chat
+	}
+	if tokens.proof != "" {
+		extra["OpenAI-Sentinel-Proof-Token"] = tokens.proof
+	}
+	if tokens.turnstile != "" {
+		extra["OpenAI-Sentinel-Turnstile-Token"] = tokens.turnstile
+	}
+	if tokens.so != "" {
+		extra["OpenAI-Sentinel-SO-Token"] = tokens.so
+	}
+	return c.buildHeaders(extra)
+}
+
 func (c *Client) Conversation(ctx context.Context, req ChatRequest) (*http.Response, error) {
-	chatToken, proofToken, err := c.chatRequirements(ctx)
+	tokens, err := c.chatRequirements(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	extra := map[string]string{"Accept": "text/event-stream"}
-	if chatToken != "" {
-		extra["openai-sentinel-chat-requirements-token"] = chatToken
-	}
-	if proofToken != "" {
-		extra["openai-sentinel-proof-token"] = proofToken
 	}
 
 	body, err := json.Marshal(c.buildConversationBody(req))
@@ -264,9 +329,14 @@ func (c *Client) Conversation(ctx context.Context, req ChatRequest) (*http.Respo
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header = c.buildHeaders(extra)
+	httpReq.Header = c.conversationHeaders(tokens)
 
-	streamClient := &http.Client{Timeout: c.conversationHTTPTimeout()}
+	// A dedicated streaming client keeps the body open indefinitely; the
+	// caller controls lifetime via ctx. Reuse the existing client on error.
+	streamClient, err := httpclient.New(httpclient.DefaultOptions())
+	if err != nil {
+		return c.http.Do(httpReq)
+	}
 	return streamClient.Do(httpReq)
 }
 
