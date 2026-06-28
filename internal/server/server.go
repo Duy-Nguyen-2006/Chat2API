@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/protocol"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/storage"
 )
 
@@ -164,7 +167,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/workspaces", s.handleWorkspaces)
 	s.mux.HandleFunc("GET /v1/gpts", s.handleGPTs)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("POST /v1/images/generations", s.handleImageGenerations)
+	s.mux.HandleFunc("POST /v1/images/edits", s.handleImageEdits)
+	s.mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
 }
+
+// poolAdapter bridges account.Pool to protocol.ImageSlotter.
+type poolAdapter struct{ p *account.Pool }
+
+func (a poolAdapter) AcquireImageToken(ctx context.Context) (string, error) {
+	acc, err := a.p.GetImageToken(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	return acc.AccessToken, nil
+}
+
+func (a poolAdapter) ReleaseImageSlot(token string) { a.p.ReleaseImageSlot(token) }
 
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
@@ -324,6 +343,19 @@ func accountIDFromRequest(r *http.Request) string {
 	return r.Header.Get("Chatgpt-Account-Id")
 }
 
+// clientForImage returns a chatgpt.Client bound to an account with an
+// available image slot, plus a release function. Mirrors server.doWithRetry
+// but specialised for the image pipeline so the slot semantics stay simple.
+func (s *Server) clientForImage(ctx context.Context) (*chatgpt.Client, func(), error) {
+	acc, err := s.pool.GetImageToken(ctx, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	fp := httpclient.NewFingerprint()
+	c := chatgpt.NewClientWith(acc.AccessToken, acc.AccountID, acc.Cookie, fp, s.pool.HTTPClient())
+	return c, func() { s.pool.ReleaseImageSlot(acc.AccessToken) }, nil
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"name":        "Chat2API",
@@ -481,4 +513,110 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body := handler.ReadNonStream(resp.Body)
 	s.successes.Add(1)
 	s.writeJSON(w, http.StatusOK, body)
+}
+
+// --- Image generation / edits ---------------------------------------------
+
+func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+	s.requests.Add(1)
+	if s.pool.Size() == 0 {
+		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured.", "no_available_account")
+		return
+	}
+	c, release, err := s.clientForImage(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, err.Error(), "no_image_slot")
+		return
+	}
+	defer release()
+
+	// Read the body so we can decode the request *and* later replace it via
+	// the protocol handler without the consumer needing to know about the
+	// pool. We pass the pool adapter through ImageSlotter so the slot is
+	// released when the protocol handler returns.
+	protocol.HandleImageGeneration(w, r, c, poolAdapter{p: s.pool})
+	s.successes.Add(1)
+}
+
+func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
+	s.requests.Add(1)
+	if s.pool.Size() == 0 {
+		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured.", "no_available_account")
+		return
+	}
+	c, release, err := s.clientForImage(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, err.Error(), "no_image_slot")
+		return
+	}
+	defer release()
+
+	// Accept either application/json (with base64 images) or multipart/form-data.
+	body := protocol.ImageEditRequest{}
+	ct := r.Header.Get("Content-Type")
+	if len(ct) >= 33 && ct[:33] == "multipart/form-data; boundary=" {
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			s.writeError(w, http.StatusBadRequest, "multipart parse: "+err.Error(), "invalid_request")
+			return
+		}
+		body.Prompt = r.FormValue("prompt")
+		body.Model = r.FormValue("model")
+		body.ResponseFormat = r.FormValue("response_format")
+		files := r.MultipartForm.File["image"]
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				s.writeError(w, http.StatusBadRequest, "image open: "+err.Error(), "invalid_request")
+				return
+			}
+			data, _ := readAll(f, 64<<20)
+			f.Close()
+			body.Images = append(body.Images, "data:image/png;base64,"+base64Encode(data))
+		}
+	} else {
+		var raw struct {
+			Prompt         string   `json:"prompt"`
+			Model          string   `json:"model"`
+			ResponseFormat string   `json:"response_format"`
+			Images         []string `json:"images"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid request body", "invalid_request")
+			return
+		}
+		body.Prompt = raw.Prompt
+		body.Model = raw.Model
+		body.ResponseFormat = raw.ResponseFormat
+		body.Images = raw.Images
+	}
+
+	protocol.HandleImageEdit(w, r, c, poolAdapter{p: s.pool}, body)
+	s.successes.Add(1)
+}
+
+// --- Anthropic /v1/messages -------------------------------------------------
+
+func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	s.requests.Add(1)
+	if s.pool.Size() == 0 {
+		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured.", "no_available_account")
+		return
+	}
+	gen, acc, err := s.clientFor(r.Context(), accountIDFromRequest(r))
+	if err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, err.Error(), "no_available_account")
+		return
+	}
+	_ = acc
+	protocol.HandleAnthropicMessages(w, r, gen)
+	s.successes.Add(1)
+}
+
+// readAll drains r up to max bytes.
+func readAll(r io.Reader, max int64) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, max))
+}
+
+func base64Encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
 }
