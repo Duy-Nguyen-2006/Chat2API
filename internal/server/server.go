@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"chat2api/internal/admin"
-	"chat2api/internal/chatgpt"
-	"chat2api/internal/config"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/admin"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
 )
 
 type Server struct {

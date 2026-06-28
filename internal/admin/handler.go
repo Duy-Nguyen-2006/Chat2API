@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"chat2api/internal/chatgpt"
-	"chat2api/internal/config"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
 )
 
 //go:embed web/*

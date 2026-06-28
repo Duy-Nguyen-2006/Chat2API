@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
-	"chat2api/internal/config"
-	"chat2api/internal/server"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/server"
 )
 
 func main() {

@@ -1,3 +1,3 @@
-module chat2api
+module github.com/Duy-Nguyen-2006/Chat2API
 
-go 1.22
+go 1.24

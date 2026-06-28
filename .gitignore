@@ -5,3 +5,15 @@ bin/
 .idea/
 .vscode/
 *.log
+
+# Runtime data / storage
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Sensitive config / credentials
+config.json
+accounts.json
+auth_keys.json
