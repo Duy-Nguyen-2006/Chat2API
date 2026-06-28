@@ -12,9 +12,11 @@ import (
 
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/account"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/admin"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/auth"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/storage"
 )
 
 const (
@@ -24,22 +26,25 @@ const (
 )
 
 type Server struct {
-	cfg        config.Config
-	pool       *account.Pool
-	loader     *account.Loader
+	cfg         config.Config
+	pool        *account.Pool
+	loader      *account.Loader
+	auth        *auth.Service
+	authMW      *auth.Middleware
+	store       storage.Backend
 	watcherStop func()
-	mux        *http.ServeMux
-	httpServer *http.Server
-	startedAt  time.Time
-	requests   atomic.Uint64
-	successes  atomic.Uint64
-	failures   atomic.Uint64
+	mux         *http.ServeMux
+	httpServer  *http.Server
+	startedAt   time.Time
+	requests    atomic.Uint64
+	successes   atomic.Uint64
+	failures    atomic.Uint64
 }
 
-// New constructs the HTTP server with an account pool. If accounts.json is
-// missing or empty, the legacy CHATGPT_ACCESS_TOKEN/COOKIES_FILE credentials
-// are migrated into the pool as a single account so existing deployments keep
-// working.
+// New constructs the HTTP server with an account pool + storage backend +
+// auth middleware. If accounts.json is missing or empty, the legacy
+// CHATGPT_ACCESS_TOKEN/COOKIES_FILE credentials are migrated into the pool
+// as a single account so existing deployments keep working.
 func New(cfg config.Config) (*Server, error) {
 	doer, err := httpclient.New(httpclient.DefaultOptions())
 	if err != nil {
@@ -50,10 +55,22 @@ func New(cfg config.Config) (*Server, error) {
 		AutoRemoveInvalid: cfg.AutoRemoveInvalid,
 	})
 
-	loader := account.NewLoader(cfg.AccountsFile)
-	stored, err := loader.Load()
+	// Storage backend (json default, optional sqlite). Persists both the
+	// account pool and the auth key registry.
+	store, err := storage.New(storage.Config{
+		Type:         storage.Type(cfg.StorageType),
+		DataDir:      cfg.StorageDir,
+		AccountsFile: cfg.AccountsFile,
+		SQLitePath:   cfg.SQLitePath,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("server: build storage: %w", err)
+	}
+
+	// Hydrate the pool from storage.
+	stored, err := store.LoadAccounts()
+	if err != nil {
+		return nil, fmt.Errorf("server: load accounts: %w", err)
 	}
 	for _, a := range stored {
 		pool.Upsert(a)
@@ -63,21 +80,44 @@ func New(cfg config.Config) (*Server, error) {
 	if pool.Size() == 0 {
 		if acc, mErr := migrateLegacyAccount(cfg); mErr == nil && acc != nil {
 			pool.Upsert(acc)
-			// Best-effort persist so subsequent boots read it back.
-			_ = loader.Save(pool.Snapshot())
-			fmt.Printf("[Server] Migrated legacy credentials into %s\n", cfg.AccountsFile)
+			if err := store.SaveAccounts(pool.Snapshot()); err != nil {
+				fmt.Printf("[Server] warning: persist migrated account: %v\n", err)
+			}
+			fmt.Printf("[Server] Migrated legacy credentials into storage\n")
 		} else if mErr != nil {
 			fmt.Printf("[Server] No legacy credentials to migrate: %v\n", mErr)
 		}
 	}
 
 	if pool.Size() == 0 {
-		fmt.Println("[Server] Warning: no ChatGPT accounts in pool. Set CHATGPT_ACCESS_TOKEN, COOKIES_FILE, or add entries to accounts.json.")
+		fmt.Println("[Server] Warning: no ChatGPT accounts in pool. Set CHATGPT_ACCESS_TOKEN, COOKIES_FILE, or POST to /admin/api/accounts.")
 	} else {
-		fmt.Printf("[Server] Account pool loaded with %d account(s)\n", pool.Size())
+		fmt.Printf("[Server] Account pool loaded with %d account(s) (storage=%s)\n", pool.Size(), store.Info()["type"])
 	}
 
-	s := &Server{cfg: cfg, pool: pool, loader: loader, mux: http.NewServeMux()}
+	// Auth service + middleware. When DISABLE_AUTH is set we still build
+	// the service so admin endpoints can manage keys, but the middleware
+	// becomes a no-op (Wrapped returns the bare handler).
+	authSvc := auth.NewService(cfg.AuthKey)
+	if storedKeys, kErr := store.LoadAuthKeys(); kErr != nil {
+		fmt.Printf("[Server] warning: load auth keys: %v\n", kErr)
+	} else if len(storedKeys) > 0 {
+		authSvc.LoadKeys(storedKeys)
+	}
+	authMW := auth.NewMiddleware(authSvc)
+	if cfg.DisableAuth {
+		fmt.Println("[Server] WARNING: API authentication is DISABLED (DISABLE_AUTH=true). Do not expose this server publicly.")
+	}
+
+	s := &Server{
+		cfg:    cfg,
+		pool:   pool,
+		loader: account.NewLoader(cfg.AccountsFile),
+		auth:   authSvc,
+		authMW: authMW,
+		store:  store,
+		mux:    http.NewServeMux(),
+	}
 	s.routes()
 
 	// Background watcher keeps tokens fresh. Caller is expected to invoke
@@ -85,7 +125,7 @@ func New(cfg config.Config) (*Server, error) {
 	w := account.NewWatcher(pool, time.Duration(cfg.RefreshIntervalMin)*time.Minute, slog.Default())
 	s.watcherStop = w.Start(context.Background())
 
-	admin.NewHandler(cfg, pool, loader).Register(s.mux)
+	admin.NewHandler(cfg, pool, s.loader, authSvc).Register(s.mux)
 	return s, nil
 }
 
@@ -128,14 +168,25 @@ func (s *Server) routes() {
 
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+	// Layer order: cors → authMW → mux. Public endpoints (set in auth)
+	// pass through authMW untouched.
+	var handler http.Handler = s.cors(s.mux)
+	if !s.cfg.DisableAuth {
+		handler = s.authMW.Wrap(handler)
+	}
 	s.httpServer = &http.Server{
 		Addr:    addr,
-		Handler: s.cors(s.mux),
+		Handler: handler,
 	}
 	s.startedAt = time.Now()
 
 	fmt.Printf("[Server] Chat2API v%s listening on http://%s\n", serverVersion, addr)
 	fmt.Println("[Server] Endpoints: POST /v1/chat/completions, GET /v1/models, GET /v1/workspaces, GET /v1/gpts, GET /admin/")
+	authState := "enabled"
+	if s.cfg.DisableAuth {
+		authState = "DISABLED"
+	}
+	fmt.Printf("[Server] Auth: %s  Storage: %s\n", authState, s.store.Info()["type"])
 
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
@@ -147,10 +198,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.watcherStop != nil {
 		s.watcherStop()
 	}
-	// Persist final state on graceful shutdown.
-	if s.loader != nil && s.pool != nil {
-		if err := s.loader.Save(s.pool.Snapshot()); err != nil {
-			fmt.Printf("[Server] warning: save accounts.json: %v\n", err)
+	// Persist final state on graceful shutdown via the configured backend.
+	if s.store != nil && s.pool != nil {
+		if err := s.store.SaveAccounts(s.pool.Snapshot()); err != nil {
+			fmt.Printf("[Server] warning: save accounts: %v\n", err)
+		}
+	}
+	if s.store != nil && s.auth != nil {
+		if err := s.store.SaveAuthKeys(s.auth.SaveKeysSnapshot()); err != nil {
+			fmt.Printf("[Server] warning: save auth keys: %v\n", err)
 		}
 	}
 	if s.httpServer == nil {

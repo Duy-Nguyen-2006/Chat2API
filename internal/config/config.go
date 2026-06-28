@@ -24,6 +24,13 @@ type Config struct {
 	AutoRelogin         bool   // password re-login on refresh failure
 	Proxy               string // global proxy URL
 
+	// API auth + storage.
+	AuthKey       string // legacy master key (admin role)
+	DisableAuth   bool   // skip auth middleware (NOT recommended)
+	StorageType   string // json | sqlite
+	StorageDir    string
+	SQLitePath    string
+
 	// Backend behaviour.
 	AutoApproveTools bool
 }
@@ -50,18 +57,23 @@ func Load() Config {
 	imageConcurrency := envInt("IMAGE_ACCOUNT_CONCURRENCY", 3)
 
 	return Config{
-		Host:                host,
-		Port:                port,
-		ChatGPTToken:        os.Getenv("CHATGPT_ACCESS_TOKEN"),
-		ChatGPTAccountID:    os.Getenv("CHATGPT_ACCOUNT_ID"),
-		CookiesFile:         envOr("COOKIES_FILE", "cookies_1.json"),
-		AccountsFile:        envOr("ACCOUNTS_FILE", "accounts.json"),
-		RefreshIntervalMin:  refreshInterval,
-		ImageConcurrency:    imageConcurrency,
-		AutoRemoveInvalid:   envBool("AUTO_REMOVE_INVALID_ACCOUNTS"),
-		AutoRelogin:         envBool("AUTO_RELOGIN_AFTER_REFRESH"),
-		Proxy:               os.Getenv("PROXY"),
-		AutoApproveTools:    autoApprove,
+		Host:               host,
+		Port:               port,
+		ChatGPTToken:       os.Getenv("CHATGPT_ACCESS_TOKEN"),
+		ChatGPTAccountID:   os.Getenv("CHATGPT_ACCOUNT_ID"),
+		CookiesFile:        envOr("COOKIES_FILE", "cookies_1.json"),
+		AccountsFile:       envOr("ACCOUNTS_FILE", "accounts.json"),
+		RefreshIntervalMin: refreshInterval,
+		ImageConcurrency:   imageConcurrency,
+		AutoRemoveInvalid:  envBool("AUTO_REMOVE_INVALID_ACCOUNTS"),
+		AutoRelogin:        envBool("AUTO_RELOGIN_AFTER_REFRESH"),
+		Proxy:              os.Getenv("PROXY"),
+		AuthKey:            os.Getenv("AUTH_KEY"),
+		DisableAuth:        envBool("DISABLE_AUTH"),
+		StorageType:        strings.ToLower(envOr("STORAGE_BACKEND", "json")),
+		StorageDir:         envOr("STORAGE_DIR", "data"),
+		SQLitePath:         os.Getenv("SQLITE_PATH"),
+		AutoApproveTools:   autoApprove,
 	}
 }
 

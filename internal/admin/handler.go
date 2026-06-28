@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/account"
+	"github.com/Duy-Nguyen-2006/Chat2API/internal/auth"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
@@ -22,11 +23,13 @@ type Handler struct {
 	cfg    config.Config
 	pool   *account.Pool
 	loader *account.Loader
+	auth   *auth.Service
 }
 
-// NewHandler builds the admin handler bound to the live account pool.
-func NewHandler(cfg config.Config, pool *account.Pool, loader *account.Loader) *Handler {
-	return &Handler{cfg: cfg, pool: pool, loader: loader}
+// NewHandler builds the admin handler bound to the live account pool and
+// auth service. Pass nil for any of them if not configured.
+func NewHandler(cfg config.Config, pool *account.Pool, loader *account.Loader, authSvc *auth.Service) *Handler {
+	return &Handler{cfg: cfg, pool: pool, loader: loader, auth: authSvc}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -41,6 +44,13 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/api/accounts/{id}/chat", h.handleChat)
 	mux.HandleFunc("POST /admin/api/accounts", h.handleAccountCreate)
 	mux.HandleFunc("DELETE /admin/api/accounts/{id}", h.handleAccountDelete)
+
+	// Auth key management.
+	mux.HandleFunc("GET /admin/api/keys", h.handleListKeys)
+	mux.HandleFunc("POST /admin/api/keys", h.handleCreateKey)
+	mux.HandleFunc("DELETE /admin/api/keys/{id}", h.handleDeleteKey)
+	mux.HandleFunc("POST /admin/api/keys/{id}/enable", h.handleEnableKey)
+	mux.HandleFunc("POST /admin/api/keys/{id}/disable", h.handleDisableKey)
 }
 
 // accountView is the admin-facing summary shape (redacts sensitive fields).
@@ -306,4 +316,97 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (h *Handler) writeError(w http.ResponseWriter, status int, msg string) {
 	h.writeJSON(w, status, map[string]any{"error": msg})
+}
+
+// --- Auth key management -------------------------------------------------
+
+// requireAdmin returns true when the request was made by an admin identity.
+// Returns false and writes a 403 when it wasn't.
+func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	id := auth.IdentityFromContext(r.Context())
+	if id == nil || !id.IsAdmin() {
+		h.writeError(w, http.StatusForbidden, "admin role required")
+		return false
+	}
+	return true
+}
+
+func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	if h.auth == nil {
+		h.writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{}})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   h.auth.Keys(),
+	})
+}
+
+func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	if h.auth == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "auth service not initialised")
+		return
+	}
+	var body struct {
+		Name string    `json:"name,omitempty"`
+		Role auth.Role `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	pub, raw, err := h.auth.CreateKey(body.Role, body.Name)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Surface the raw key ONCE in the response so the caller can copy it.
+	h.writeJSON(w, http.StatusCreated, map[string]any{
+		"key":  raw,
+		"meta": pub,
+	})
+}
+
+func (h *Handler) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	if h.auth == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "auth service not initialised")
+		return
+	}
+	if !h.auth.DeleteKey(r.PathValue("id")) {
+		h.writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleEnableKey(w http.ResponseWriter, r *http.Request) {
+	h.toggleKey(w, r, true)
+}
+
+func (h *Handler) handleDisableKey(w http.ResponseWriter, r *http.Request) {
+	h.toggleKey(w, r, false)
+}
+
+func (h *Handler) toggleKey(w http.ResponseWriter, r *http.Request, enabled bool) {
+	if !h.requireAdmin(w, r) {
+		return
+	}
+	if h.auth == nil {
+		h.writeError(w, http.StatusServiceUnavailable, "auth service not initialised")
+		return
+	}
+	if !h.auth.SetEnabled(r.PathValue("id"), enabled) {
+		h.writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
