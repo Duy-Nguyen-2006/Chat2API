@@ -15,6 +15,9 @@ var SupportedModels = []string{
 }
 
 func MapModel(model string) string {
+	if extractGizmoID(model) != "" {
+		return "auto"
+	}
 	lower := strings.ToLower(model)
 	switch {
 	case strings.Contains(lower, "o3-mini-high"):

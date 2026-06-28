@@ -8,12 +8,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"chat2api/internal/admin"
 	"chat2api/internal/chatgpt"
 	"chat2api/internal/config"
 )
 
 type Server struct {
 	cfg        config.Config
+	creds      chatgpt.Credentials
 	mux        *http.ServeMux
 	httpServer *http.Server
 	startedAt  time.Time
@@ -22,10 +24,16 @@ type Server struct {
 	failures   atomic.Uint64
 }
 
-func New(cfg config.Config) *Server {
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+func New(cfg config.Config) (*Server, error) {
+	creds, err := chatgpt.ResolveCredentials(cfg.ChatGPTToken, cfg.ChatGPTAccountID, cfg.CookiesFile)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Server{cfg: cfg, creds: creds, mux: http.NewServeMux()}
 	s.routes()
-	return s
+	admin.NewHandler(cfg, creds).Register(s.mux)
+	return s, nil
 }
 
 func (s *Server) routes() {
@@ -33,6 +41,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/models/{model}", s.handleModel)
+	s.mux.HandleFunc("GET /v1/workspaces", s.handleWorkspaces)
+	s.mux.HandleFunc("GET /v1/gpts", s.handleGPTs)
 	s.mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 }
 
@@ -45,7 +55,7 @@ func (s *Server) ListenAndServe() error {
 	s.startedAt = time.Now()
 
 	fmt.Printf("[Server] Chat2API (ChatGPT-only) listening on http://%s\n", addr)
-	fmt.Println("[Server] Endpoints: POST /v1/chat/completions, GET /v1/models")
+	fmt.Println("[Server] Endpoints: POST /v1/chat/completions, GET /v1/models, GET /v1/workspaces, GET /v1/gpts, GET /admin/")
 
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
@@ -64,7 +74,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, ChatGPT-Account-ID")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -90,8 +100,16 @@ func (s *Server) writeError(w http.ResponseWriter, status int, message, code str
 	})
 }
 
-func (s *Server) client() *chatgpt.Client {
-	return chatgpt.NewClient(s.cfg.ChatGPTToken, s.cfg.ChatGPTAccountID)
+func (s *Server) client(accountID string) *chatgpt.Client {
+	c := chatgpt.NewClient(s.creds.AccessToken, s.creds.AccountID, s.creds.Cookie, s.creds.DeviceID)
+	return c.WithAccountID(accountID)
+}
+
+func accountIDFromRequest(r *http.Request) string {
+	if v := r.Header.Get("ChatGPT-Account-ID"); v != "" {
+		return v
+	}
+	return r.Header.Get("Chatgpt-Account-Id")
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
@@ -102,7 +120,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
 		"endpoints": []string{
 			"POST /v1/chat/completions",
 			"GET /v1/models",
+			"GET /v1/workspaces",
+			"GET /v1/gpts",
 			"GET /health",
+			"GET /admin/",
 		},
 	})
 }
@@ -156,11 +177,47 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 	s.writeError(w, http.StatusNotFound, fmt.Sprintf("Model '%s' not found", model), "model_not_found")
 }
 
+func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	s.requests.Add(1)
+
+	if s.creds.AccessToken == "" {
+		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT account configured. Set CHATGPT_ACCESS_TOKEN or COOKIES_FILE.", "no_available_account")
+		return
+	}
+
+	list, err := s.client("").ListWorkspaces(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+
+	s.successes.Add(1)
+	s.writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleGPTs(w http.ResponseWriter, r *http.Request) {
+	s.requests.Add(1)
+
+	if s.creds.AccessToken == "" {
+		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT account configured. Set CHATGPT_ACCESS_TOKEN or COOKIES_FILE.", "no_available_account")
+		return
+	}
+
+	list, err := s.client(accountIDFromRequest(r)).ListGizmos(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error(), "")
+		return
+	}
+
+	s.successes.Add(1)
+	s.writeJSON(w, http.StatusOK, list)
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 
-	if s.cfg.ChatGPTToken == "" {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT account configured. Set CHATGPT_ACCESS_TOKEN.", "no_available_account")
+	if s.creds.AccessToken == "" {
+		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT account configured. Set CHATGPT_ACCESS_TOKEN or COOKIES_FILE.", "no_available_account")
 		return
 	}
 
@@ -179,7 +236,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	resp, err := s.client().Conversation(ctx, req)
+	client := s.client(accountIDFromRequest(r))
+	var resp *http.Response
+	var err error
+	if s.cfg.AutoApproveTools {
+		resp, err = client.ConversationAutoApprove(ctx, req)
+	} else {
+		resp, err = client.Conversation(ctx, req)
+	}
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err.Error(), "")
 		return

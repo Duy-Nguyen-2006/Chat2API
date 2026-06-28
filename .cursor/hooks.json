@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterAgentResponse": [
+      {
+        "command": "/home/duy/Downloads/Chat2API/.cursor/codemod/periodic-update/check-updates.sh"
+      }
+    ]
+  }
+}

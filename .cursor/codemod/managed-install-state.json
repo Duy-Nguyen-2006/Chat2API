@@ -1,0 +1,49 @@
+{
+  "schema_version": "1",
+  "harness": "cursor",
+  "scope": "project",
+  "components": [
+    {
+      "id": "command:codemod",
+      "kind": "command",
+      "path": "/home/duy/Downloads/Chat2API/.cursor/commands/codemod.md",
+      "version": "1.12.7",
+      "fingerprint": "514d4336ddbdc78acf9476c1329410b18d25ba79966ebc69e86038fd4174757e"
+    },
+    {
+      "id": "discovery-guide:AGENTS.md",
+      "kind": "discovery_guide",
+      "path": "/home/duy/Downloads/Chat2API/AGENTS.md",
+      "version": null,
+      "fingerprint": "1033abba9ff88e203785d8d46a600a89a67d06b9a6af448343f58318df4d5ed6"
+    },
+    {
+      "id": "periodic-trigger:check-updates.sh",
+      "kind": "discovery_guide",
+      "path": "/home/duy/Downloads/Chat2API/.cursor/codemod/periodic-update/check-updates.sh",
+      "version": null,
+      "fingerprint": "ccbc211b81d21a12dd0bb10d8277fcc94d69cf1855b1dec72a2f2df41ed78149"
+    },
+    {
+      "id": "periodic-trigger:hooks.json",
+      "kind": "discovery_guide",
+      "path": "/home/duy/Downloads/Chat2API/.cursor/hooks.json",
+      "version": null,
+      "fingerprint": "a301a241c7fd7cd7bf173528bdbc2dd8c572b58bde2865fa23e3e9ad32de6394"
+    },
+    {
+      "id": "codemod-mcp",
+      "kind": "mcp_config",
+      "path": "/home/duy/Downloads/Chat2API/.cursor/mcp.json",
+      "version": null,
+      "fingerprint": "468b5e74e8b9fa627f2e22711ff7e5108e5b6fde7aa7396ac37075749dd80fc9"
+    },
+    {
+      "id": "codemod",
+      "kind": "skill",
+      "path": "/home/duy/Downloads/Chat2API/.cursor/skills/codemod/SKILL.md",
+      "version": "1.1.0",
+      "fingerprint": "b4062d5a201d28bbb1b6b6157354d05400114070740f0d381b7541cea97ae9ed"
+    }
+  ]
+}

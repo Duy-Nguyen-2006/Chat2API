@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codemod": {
+      "command": "/home/duy/.npm/_npx/bef22f83919465d9/node_modules/@codemod.com/cli-linux-x64-gnu/codemod",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

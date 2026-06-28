@@ -17,10 +17,14 @@ func main() {
 
 	if cfg.ChatGPTToken == "" {
 		fmt.Println("[Server] Warning: CHATGPT_ACCESS_TOKEN is not set.")
-		fmt.Println("         Copy .env.example to .env and add your token.")
+		fmt.Printf("         Will try cookies from %s if present.\n", cfg.CookiesFile)
 	}
 
-	srv := server.New(cfg)
+	srv, err := server.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[Server] Failed to initialize credentials: %v\n", err)
+		os.Exit(1)
+	}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
