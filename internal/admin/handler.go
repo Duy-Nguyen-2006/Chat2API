@@ -149,7 +149,9 @@ func (h *Handler) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 // handleAccountDelete removes the named account from the pool.
 func (h *Handler) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("id")
-	items := h.pool.List()
+	// Walk the authoritative snapshot (not the censored list) so the
+	// DisplayName matcher and the real access_token are aligned.
+	items := h.pool.Snapshot()
 	var target string
 	for _, a := range items {
 		if account.DisplayName(a) == name {
@@ -170,8 +172,10 @@ func (h *Handler) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 
 // resolveAccountAccessToken picks the account by admin-supplied id and
 // returns its access_token. The id matches the email or token-prefix view.
+// Uses Snapshot() (not List()) so the matched AccessToken is the real key,
+// not a redacted copy.
 func (h *Handler) resolveAccountAccessToken(id string) (string, error) {
-	for _, a := range h.pool.List() {
+	for _, a := range h.pool.Snapshot() {
 		if account.DisplayName(a) == id {
 			return a.AccessToken, nil
 		}

@@ -7,14 +7,20 @@ import (
 )
 
 // PublicEndpoint lists routes that bypass auth. Add new public routes here.
+//
+// /admin/api/* are NOT public — they require auth like any other admin call.
+// Only the static SPA files under /admin/ are public, so the dashboard loads
+// without an API key (the SPA then attaches Bearer tokens on its own calls).
 func PublicEndpoint(path string) bool {
 	switch path {
-	case "/", "/health", "/v1/models":
+	case "/", "/health", "/healthz", "/v1/models":
 		return true
 	}
-	if strings.HasPrefix(path, "/admin/") {
-		// /admin/ serves the SPA — the SPA itself calls /admin/api/* which is
-		// protected. Browsers won't send Authorization on static GETs.
+	// Static SPA — anything under /admin/ that isn't the API namespace.
+	if strings.HasPrefix(path, "/admin/") && !strings.HasPrefix(path, "/admin/api/") {
+		return true
+	}
+	if path == "/admin" {
 		return true
 	}
 	return false
