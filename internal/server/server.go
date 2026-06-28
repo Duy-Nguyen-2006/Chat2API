@@ -162,6 +162,8 @@ func migrateLegacyAccount(cfg config.Config) (*account.Account, error) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /{$}", s.handleRoot)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.mux.HandleFunc("GET /readyz", s.handleReady)
 	s.mux.HandleFunc("GET /v1/models", s.handleModels)
 	s.mux.HandleFunc("GET /v1/models/{model}", s.handleModel)
 	s.mux.HandleFunc("GET /v1/workspaces", s.handleWorkspaces)
@@ -367,6 +369,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, _ *http.Request) {
 			"GET /v1/workspaces",
 			"GET /v1/gpts",
 			"GET /health",
+			"GET /healthz",
+			"GET /readyz",
 			"GET /admin/",
 		},
 	})
@@ -388,6 +392,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"pool": map[string]any{
 			"size": s.pool.Size(),
 		},
+	})
+}
+
+// handleReady is a Kubernetes-style readiness probe: 200 only when the
+// pool has at least one usable (non-invalid, non-disabled) account.
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	if s.pool == nil || s.pool.Size() == 0 {
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready",
+			"reason": "no accounts in pool",
+		})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ready",
+		"pool":   s.pool.Size(),
 	})
 }
 

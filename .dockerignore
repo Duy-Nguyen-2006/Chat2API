@@ -1,0 +1,25 @@
+# Anything in .gitignore is also ignored by Docker by default, but we add
+# the noise files explicitly so the build context stays small.
+bin/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+data/
+accounts.json
+auth_keys.json
+config.json
+cookies_*.json
+.git/
+.gitnexus/
+.cursor/
+.claude/
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+Makefile
+run.sh
