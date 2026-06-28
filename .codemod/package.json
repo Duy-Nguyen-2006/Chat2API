@@ -1,0 +1,16 @@
+{
+  "name": "chat2api-codemods",
+  "version": "0.1.0",
+  "description": "Chat2API codemods",
+  "packageManager": "npm@10.x",
+  "type": "module",
+  "scripts": {
+    "test": "npx codemod@latest jssg test -l javascript ./scripts/examples/var-to-const.ts",
+    "validate": "npx codemod@latest workflow validate -w workflow.yaml",
+    "check-types": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@codemod.com/jssg-types": "latest",
+    "typescript": "latest"
+  }
+}

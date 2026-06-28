@@ -2,6 +2,7 @@
 node_modules/
 
 # Build outputs
+bin/
 out/
 dist/
 build/entitlements.mac.plist

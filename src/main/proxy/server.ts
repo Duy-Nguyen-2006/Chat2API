@@ -23,7 +23,7 @@ export class ProxyServer {
   private router: Router
   private server: HttpServer | null = null
   private port: number = 8080
-  private host: string = '127.0.0.1'
+  private host: string = 'localhost'
 
   constructor() {
     this.app = new Koa()
@@ -162,9 +162,9 @@ export class ProxyServer {
 
     this.router.get('/', async (ctx) => {
       ctx.body = {
-        name: 'Chat2API Proxy',
-        version: '1.1.2',
-        description: 'OpenAI API compatible proxy service',
+        name: 'Chat2API',
+        version: '2.0.0',
+        description: 'ChatGPT-only OpenAI API compatible proxy',
         endpoints: [
           'POST /v1/chat/completions',
           'GET /v1/models',

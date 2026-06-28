@@ -1,12 +1,11 @@
 /**
  * Credential Storage Module - Core Storage Implementation
- * Uses electron-store for persistent storage
- * Uses Electron's safeStorage API for sensitive data encryption
+ * Uses JSON file storage for headless server mode
  */
 
-import { app, safeStorage, BrowserWindow } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
+import { JsonFileStore } from './jsonStore'
 import {
   StoreSchema,
   AppConfig,
@@ -36,20 +35,14 @@ import {
   normalizeModelMappingsWithDefaults,
   sanitizeDeepSeekModelOverrides,
 } from './types'
-import { BUILTIN_PROMPTS } from '../data/builtin-prompts'
+const BUILTIN_PROMPTS: SystemPrompt[] = []
 import { RequestLogManager } from '../requestLogs/manager'
 import { normalizeRequestLogConfig } from '../requestLogs/types'
 import { normalizeToolCallingConfig } from '../../shared/toolCalling'
 import { AppLogManager } from '../appLogs/manager'
 import type { AppLogFilter } from '../appLogs/types'
 
-// Dynamically import electron-store (ESM module)
-let Store: any = null
-
-/**
- * Storage Instance Type Definition
- */
-type StoreType = any
+type StoreType = JsonFileStore<StoreSchema>
 
 /**
  * Storage Manager Class
@@ -58,13 +51,13 @@ type StoreType = any
 class StoreManager {
   private store: StoreType | null = null
   private isInitialized: boolean = false
-  private mainWindow: BrowserWindow | null = null
+  private mainWindow: null = null
   private initializationError: Error | null = null
   private requestLogManager: RequestLogManager | null = null
   private appLogManager: AppLogManager | null = null
 
-  setMainWindow(window: BrowserWindow | null): void {
-    this.mainWindow = window
+  setMainWindow(_window: unknown): void {
+    this.mainWindow = null
   }
 
   /**
@@ -90,20 +83,13 @@ class StoreManager {
       return
     }
 
-    // Dynamically import electron-store (ESM module)
-    if (!Store) {
-      const module = await import('electron-store')
-      Store = module.default
-    }
-
     const storagePath = this.getStoragePath()
 
     try {
-      this.store = new Store({
+      this.store = new JsonFileStore({
         name: 'data',
         cwd: storagePath,
         defaults: this.getDefaultData(),
-        encryptionKey: this.getEncryptionKey(),
       })
 
       await this.initializeAppLogManager(storagePath)
@@ -119,11 +105,10 @@ class StoreManager {
       // Try to recover by backing up corrupted data and reinitializing
       try {
         await this.recoverFromCorruptedData(storagePath)
-        this.store = new Store({
+        this.store = new JsonFileStore({
           name: 'data',
           cwd: storagePath,
           defaults: this.getDefaultData(),
-          encryptionKey: this.getEncryptionKey(),
         })
         await this.initializeAppLogManager(storagePath)
         await this.initializeRequestLogManager(storagePath)
@@ -169,24 +154,7 @@ class StoreManager {
     return join(homedir(), '.chat2api')
   }
 
-  /**
-   * Get Encryption Key
-   * Returns a fixed encryption key for electron-store
-   * Note: electron-store uses this key to encrypt/decrypt the data file,
-   * so it must be stable across app restarts
-   */
-  private getEncryptionKey(): string | undefined {
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        // Use a fixed key - electron-store will use this to encrypt/decrypt data
-        // The key itself is not stored in the data file, only used for encryption
-        return 'chat2api-fixed-encryption-key-v1'
-      }
-    } catch (error) {
-      console.warn('Encryption unavailable, using unencrypted storage:', error)
-    }
-    return undefined
-  }
+
 
   /**
    * Get Default Data Structure
@@ -300,15 +268,7 @@ class StoreManager {
       if (p.type === 'builtin') {
         const builtinConfig = BUILTIN_PROVIDERS.find(bp => bp.id === p.id)
         if (builtinConfig) {
-          if (p.id === 'deepseek') {
-            const sanitizedOverrides = sanitizeDeepSeekModelOverrides(userModelOverrides[p.id])
-            if (JSON.stringify(sanitizedOverrides) !== JSON.stringify(userModelOverrides[p.id])) {
-              userModelOverrides[p.id] = sanitizedOverrides
-              userModelOverridesChanged = true
-            }
-          }
-
-          return { 
+          return {
             ...p, 
             apiEndpoint: builtinConfig.apiEndpoint,
             chatPath: builtinConfig.chatPath,
@@ -410,23 +370,6 @@ class StoreManager {
    * @returns Encrypted string
    */
   encryptData(data: string): string {
-    try {
-      console.log('[Store] encryptData input length:', data.length, 'content:', data.substring(0, 20) + '...')
-      if (safeStorage.isEncryptionAvailable()) {
-        // Create new Buffer to store encryption result
-        const encrypted = Buffer.from(safeStorage.encryptString(data))
-        const result = encrypted.toString('base64')
-        console.log('[Store] encryptData output length:', result.length, 'content:', result.substring(0, 20) + '...')
-        // Verify encryption is correct
-        const decrypted = safeStorage.decryptString(encrypted)
-        console.log('[Store] encryptData verify decryption:', decrypted.substring(0, 20) + '...', 'match:', decrypted === data)
-        return result
-      } else {
-        console.log('[Store] Encryption unavailable, returning original data')
-      }
-    } catch (error) {
-      console.error('Failed to encrypt data:', error)
-    }
     return data
   }
 
@@ -436,14 +379,6 @@ class StoreManager {
    * @returns Decrypted string
    */
   decryptData(encryptedData: string): string {
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        const buffer = Buffer.from(encryptedData, 'base64')
-        return safeStorage.decryptString(buffer)
-      }
-    } catch (error) {
-      console.error('Failed to decrypt data:', error)
-    }
     return encryptedData
   }
 

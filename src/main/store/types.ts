@@ -602,16 +602,18 @@ export interface ProviderModelOverrides {
  */
 export type UserModelOverrides = Record<string, ProviderModelOverrides>
 
-export const DEEPSEEK_PRIMARY_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro']
-
-export const DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES = [
-  'deepseek-chat',
-  'deepseek-reasoner',
-  'DeepSeek-V3.2',
-  'DeepSeek-Search',
-  'DeepSeek-R1',
-  'DeepSeek-R1-Search',
+export const CHATGPT_PRIMARY_MODELS = [
+  'gpt-4o',
+  'gpt-4o-mini',
+  'gpt-4',
+  'gpt-3.5-turbo',
+  'o1',
+  'o1-mini',
+  'o3-mini',
+  'auto',
 ]
+
+export const CHATGPT_LEGACY_MODEL_MAPPING_NAMES: string[] = []
 
 /**
  * Effective Model Information
@@ -711,53 +713,28 @@ export const DEFAULT_REQUEST_LOG_CONFIG: RequestLogConfig = {
   redactSensitiveData: true,
 }
 
-export const DEFAULT_DEEPSEEK_MODEL_MAPPINGS: Record<string, ModelMapping> = {
-  'deepseek-v4-flash-think': {
-    requestModel: 'deepseek-v4-flash-think',
-    actualModel: 'deepseek-v4-flash',
-    preferredProviderId: 'deepseek',
-  },
-  'deepseek-v4-flash-search': {
-    requestModel: 'deepseek-v4-flash-search',
-    actualModel: 'deepseek-v4-flash',
-    preferredProviderId: 'deepseek',
-  },
-  'deepseek-v4-flash-think-search': {
-    requestModel: 'deepseek-v4-flash-think-search',
-    actualModel: 'deepseek-v4-flash',
-    preferredProviderId: 'deepseek',
-  },
-  'deepseek-v4-pro-think': {
-    requestModel: 'deepseek-v4-pro-think',
-    actualModel: 'deepseek-v4-pro',
-    preferredProviderId: 'deepseek',
-  },
-  'deepseek-v4-pro-search': {
-    requestModel: 'deepseek-v4-pro-search',
-    actualModel: 'deepseek-v4-pro',
-    preferredProviderId: 'deepseek',
-  },
-  'deepseek-v4-pro-think-search': {
-    requestModel: 'deepseek-v4-pro-think-search',
-    actualModel: 'deepseek-v4-pro',
-    preferredProviderId: 'deepseek',
+export const DEFAULT_CHATGPT_MODEL_MAPPINGS: Record<string, ModelMapping> = {
+  'gpt-3.5-turbo': {
+    requestModel: 'gpt-3.5-turbo',
+    actualModel: 'text-davinci-002-render-sha',
+    preferredProviderId: 'chatgpt',
   },
 }
 
 export function createDefaultModelMappings(): Record<string, ModelMapping> {
   return Object.fromEntries(
-    Object.entries(DEFAULT_DEEPSEEK_MODEL_MAPPINGS).map(([key, mapping]) => [key, { ...mapping }]),
+    Object.entries(DEFAULT_CHATGPT_MODEL_MAPPINGS).map(([key, mapping]) => [key, { ...mapping }]),
   )
 }
 
 export function isDefaultModelMapping(requestModel: string): boolean {
-  return requestModel in DEFAULT_DEEPSEEK_MODEL_MAPPINGS
+  return requestModel in DEFAULT_CHATGPT_MODEL_MAPPINGS
 }
 
 export function normalizeModelMappingsWithDefaults(
   mappings?: Record<string, ModelMapping>
 ): Record<string, ModelMapping> {
-  const legacyModelNames = new Set(DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES)
+  const legacyModelNames = new Set(CHATGPT_LEGACY_MODEL_MAPPING_NAMES)
   const customMappings = Object.fromEntries(
     Object.entries(mappings || {}).filter(([requestModel]) =>
       !isDefaultModelMapping(requestModel) && !legacyModelNames.has(requestModel)
@@ -770,13 +747,13 @@ export function normalizeModelMappingsWithDefaults(
   }
 }
 
-export function sanitizeDeepSeekModelOverrides(
+export function sanitizeChatGPTModelOverrides(
   overrides?: ProviderModelOverrides
 ): ProviderModelOverrides {
   const migratedModelNames = new Set([
-    ...DEEPSEEK_PRIMARY_MODELS,
-    ...DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES,
-    ...Object.keys(DEFAULT_DEEPSEEK_MODEL_MAPPINGS),
+    ...CHATGPT_PRIMARY_MODELS,
+    ...CHATGPT_LEGACY_MODEL_MAPPING_NAMES,
+    ...Object.keys(DEFAULT_CHATGPT_MODEL_MAPPINGS),
   ])
 
   return {
@@ -784,24 +761,27 @@ export function sanitizeDeepSeekModelOverrides(
       !migratedModelNames.has(model.displayName)
     ),
     excludedModels: (overrides?.excludedModels || []).filter(model =>
-      DEEPSEEK_PRIMARY_MODELS.includes(model)
+      CHATGPT_PRIMARY_MODELS.includes(model)
     ),
   }
 }
+
+/** @deprecated Use sanitizeChatGPTModelOverrides */
+export const sanitizeDeepSeekModelOverrides = sanitizeChatGPTModelOverrides
 
 /**
  * Default Application Configuration
  */
 export const DEFAULT_CONFIG: AppConfig = {
   proxyPort: 8080,
-  proxyHost: '127.0.0.1',
+  proxyHost: 'localhost',
   loadBalanceStrategy: 'round-robin',
   modelMappings: createDefaultModelMappings(),
   defaultModelMappingsSeeded: true,
   theme: 'system',
   autoStart: false,
-  autoStartProxy: false,
-  minimizeToTray: true,
+  autoStartProxy: true,
+  minimizeToTray: false,
   logLevel: 'info',
   logRetentionDays: 7,
   requestLogConfig: DEFAULT_REQUEST_LOG_CONFIG,

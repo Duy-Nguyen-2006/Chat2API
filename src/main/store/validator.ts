@@ -5,7 +5,7 @@
 
 import axios, { AxiosError } from 'axios'
 import { Provider, ValidationResult, AuthType } from './types'
-import { ProviderChecker } from '../providers/checker'
+
 
 /**
  * Validator interface
@@ -214,7 +214,7 @@ class ChatGPTWebValidator implements Validator {
   }
 
   async validate(credentials: Record<string, string>): Promise<ValidationResult> {
-    const cookie = credentials.cookie || credentials.sessionToken
+    const cookie = credentials.cookie || credentials.sessionToken || credentials.accessToken
     
     if (!cookie) {
       return {
@@ -225,10 +225,11 @@ class ChatGPTWebValidator implements Validator {
     }
     
     try {
+      const isBearer = cookie.startsWith('eyJ') || cookie.startsWith('fk-')
       const response = await axios.get(`${this.apiEndpoint}/api/auth/session`, {
-        headers: {
-          Cookie: cookie,
-        },
+        headers: isBearer
+          ? { Authorization: `Bearer ${cookie}` }
+          : { Cookie: cookie },
         timeout: 10000,
       })
       
@@ -382,26 +383,10 @@ export async function validateCredentials(
   provider: Provider,
   credentials: Record<string, string>
 ): Promise<ValidationResult> {
-  // Built-in providers use ProviderChecker for validation
-  if (provider.type === 'builtin') {
-    const tempAccount = {
-      id: 'temp',
-      providerId: provider.id,
-      name: 'temp',
-      credentials,
-      status: 'active' as const,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    }
-    
-    const result = await ProviderChecker.checkAccountToken(provider, tempAccount)
-    
-    return {
-      valid: result.valid,
-      error: result.error,
-      validatedAt: Date.now(),
-      accountInfo: result.userInfo,
-    }
+  if (provider.type === 'builtin' && provider.id === 'chatgpt') {
+    const validator = new ChatGPTWebValidator('https://chatgpt.com')
+    const token = credentials.accessToken || credentials.token || credentials.cookie
+    return validator.validate({ accessToken: token, cookie: token })
   }
   
   // Custom providers use generic validator

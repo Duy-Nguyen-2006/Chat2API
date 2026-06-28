@@ -1,633 +1,126 @@
-# AGENTS.md
+# Ponytail, lazy senior dev mode
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+You are a lazy senior developer. Lazy means efficient, not careless. The best code is the code never written.
 
-## Project Overview
+Before writing any code, stop at the first rung that holds:
 
-Chat2API Manager is an Electron desktop application that provides an OpenAI-compatible API proxy for multiple AI service providers (DeepSeek, GLM, Kimi, MiniMax, Qwen, Z.ai, Perplexity). It enables using any OpenAI-compatible client with these providers across macOS, Windows, and Linux.
+1. Does this need to be built at all? (YAGNI)
+2. Does it already exist in this codebase? Reuse the helper, util, or pattern that's already here, don't re-write it.
+3. Does the standard library already do this? Use it.
+4. Does a native platform feature cover it? Use it.
+5. Does an already-installed dependency solve it? Use it.
+6. Can this be one line? Make it one line.
+7. Only then: write the minimum code that works.
 
-## Build Commands
+The ladder runs after you understand the problem, not instead of it: read the task and the code it touches, trace the real flow end to end, then climb.
 
-```bash
-# Development
-npm run dev              # Start dev server (macOS/Linux)
-npm run dev:win          # Start dev server (Windows)
+Bug fix = root cause, not symptom: a report names a symptom. Grep every caller of the function you touch and fix the shared function once — one guard there is a smaller diff than one per caller, and patching only the path the ticket names leaves a sibling caller still broken.
 
-# Build
-npm run build            # Build the application
-npm run build:mac        # Build for macOS (dmg, zip)
-npm run build:win        # Build for Windows (nsis)
-npm run build:linux      # Build for Linux (AppImage, deb)
-npm run build:all        # Build for all platforms
+Rules:
 
-# Preview production build
-npm run preview
-```
+- No abstractions that weren't explicitly requested.
+- No new dependency if it can be avoided.
+- No boilerplate nobody asked for.
+- Deletion over addition. Boring over clever. Fewest files possible.
+- Shortest working diff wins, but only once you understand the problem. The smallest change in the wrong place isn't lazy, it's a second bug.
+- Question complex requests: "Do you actually need X, or does Y cover it?"
+- Pick the edge-case-correct option when two stdlib approaches are the same size, lazy means less code, not the flimsier algorithm.
+- Mark intentional simplifications with a `ponytail:` comment. If the shortcut has a known ceiling (global lock, O(n²) scan, naive heuristic), the comment names the ceiling and the upgrade path.
 
-## Architecture
+Not lazy about: understanding the problem (read it fully and trace the real flow before picking a rung, a small diff you don't understand is just laziness dressed up as efficiency), input validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs (the platform is never the spec ideal, a clock drifts, a sensor reads off), anything explicitly requested. Lazy code without its check is unfinished: non-trivial logic leaves ONE runnable check behind, the smallest thing that fails if the logic breaks (an assert-based demo/self-check or one small test file; no frameworks, no fixtures). Trivial one-liners need no test.
 
-```
-src/
-├── main/                    # Electron main process
-│   ├── index.ts            # App entry point
-│   ├── ipc/                # IPC handlers (main ↔ renderer communication)
-│   ├── proxy/              # Proxy server (Koa)
-│   │   ├── server.ts       # HTTP server with middleware
-│   │   ├── forwarder.ts    # Request forwarding logic & auth
-│   │   ├── adapters/       # Provider-specific adapters
-│   │   ├── routes.ts       # Proxy routes registration
-│   │   ├── sessionManager.ts # Multi-turn conversation management
-│   │   └── services/       # Prompt injection & prompt generation
-│   ├── oauth/              # OAuth authentication
-│   │   ├── manager.ts      # OAuth flow orchestration
-│   │   ├── inAppLogin.ts   # In-app browser login with token auto-extraction
-│   │   └── adapters/       # Provider-specific OAuth adapters
-│   ├── providers/          # Provider configurations
-│   │   ├── builtin/        # Built-in provider configs (one file per provider)
-│   │   └── custom.ts       # Custom provider support
-│   ├── store/              # Persistent storage (electron-store)
-│   │   ├── store.ts        # Main store manager with IPC bridge
-│   │   ├── types.ts        # Type definitions and default values
-│   │   └── config.ts       # Configuration management
-│   └── tray/               # System tray integration
-├── preload/                # Context bridge (IPC API exposure)
-├── renderer/               # React frontend
-│   ├── components/         # UI components
-│   ├── pages/              # Page components
-│   ├── stores/             # Zustand state management
-│   └── i18n/               # Internationalization (en-US, zh-CN)
-└── shared/                 # Shared types between main and renderer
-```
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
 
-## Key Concepts
+This project is indexed by GitNexus as **Chat2API** (4314 symbols, 12079 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-### Provider Adapters
-Each AI provider has a dedicated adapter in `src/main/proxy/adapters/` that handles:
-- Message format conversion (OpenAI format → provider-specific format)
-- Authentication header construction
-- Stream response parsing
-- Multi-turn conversation context
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
-To add a new provider:
-1. Create config in `src/main/providers/builtin/<provider>.ts`
-2. Create OAuth adapter in `src/main/oauth/adapters/<provider>.ts`
-3. Create proxy adapter in `src/main/proxy/adapters/<provider>.ts`
-4. Create stream handler in `src/main/proxy/adapters/<provider>-stream.ts`
-5. Register in `src/main/providers/builtin/index.ts` and `src/main/proxy/adapters/index.ts`
+## Always Do
 
-### IPC Communication
-All main-renderer communication uses IPC channels defined in `src/main/ipc/channels.ts`. The naming convention is `domain:action` (e.g., `proxy:start`, `accounts:add`).
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
 
-### Session Management
-Multi-turn conversations are managed by `sessionManager.ts`:
-- `single` mode: Session deleted after each chat
-- `multi` mode: Session persists with parent message IDs for context
+## Never Do
 
-### Tool Prompt Injection
-For models without native function calling, prompts are injected via `promptInjectionService.ts`. This enables function calling compatibility with clients like Cherry Studio and Kilo Code.
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
 
-### Session Management Flow
-1. Client sends request with `sessionId`
-2. `sessionManager.ts` retrieves session or creates new one
-3. For `multi` mode: parentMessageId is used to fetch conversation history
-4. Adapter creates/uses provider-specific session
-5. Response is returned with new parentMessageId for context continuation
+## Resources
 
-## Data Storage
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/Chat2API/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/Chat2API/clusters` | All functional areas |
+| `gitnexus://repo/Chat2API/processes` | All execution flows |
+| `gitnexus://repo/Chat2API/process/{name}` | Step-by-step execution trace |
 
-Application data is stored in `~/.chat2api/`:
-- `config.json` - Application configuration
-- `providers.json` - Provider settings
-- `accounts.json` - Account credentials (encrypted)
-- `logs/` - Request logs
+## CLI
 
-## Tech Stack
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
-| Component | Technology |
-|-----------|------------|
-| Framework | Electron 33+ |
-| Frontend | React 18 + TypeScript |
-| Styling | Tailwind CSS |
-| State | Zustand |
-| Build | Vite + electron-vite |
-| Server | Koa |
+<!-- gitnexus:end -->
 
-## Coding Guidelines
+<!-- codemod:start -->
+# Codemod — AST Transformations
 
-### Immutability (CRITICAL)
-ALWAYS create new objects, NEVER mutate existing ones. Use `update` functions that return new copies.
+This repo ships a local [Codemod](https://codemod.com) workflow in `.codemod/` for bulk, repeatable code migrations. Use it together with GitNexus: **impact first**, **dry-run always**, then apply.
 
-### Error Handling
-Handle errors comprehensively:
-- Validate all user input before processing
-- Provide user-friendly error messages in UI-facing code
-- Log detailed error context on the server side
-- Never silently swallow errors
+> First time? `npm --prefix .codemod install` if `.codemod/node_modules` is missing.
 
-### Input Validation
-Validate at system boundaries (user input, external APIs). Use schema-based validation where available.
+## Always Do
 
-### Security
-- Validate all API keys before use
-- Sanitize all user inputs
-- Never trust external data (API responses, user input, file content)
-- Rotate any exposed secrets immediately
+- **MUST run GitNexus `impact` before bulk transforms** on symbols that will be rewritten. Report blast radius alongside the planned codemod scope.
+- **MUST run `npm run codemod:validate`** before executing a workflow — confirms `.codemod/workflow.yaml` is valid.
+- **MUST run `npm run codemod:dry-run`** before applying changes. Review the diff output and confirm only expected files are touched.
+- **MUST run `npm run codemod:test`** after editing transforms in `.codemod/scripts/`.
+- **MUST run GitNexus `detect_changes()` after applying** a codemod to verify affected symbols and execution flows match expectations.
+- For **symbol renames** that must follow the call graph, prefer GitNexus `rename` over codemod pattern matching.
+- When exploring registry packages, search first: `npx codemod@latest search <query>`, then dry-run: `npx codemod@latest run <package> --target . --dry-run`.
 
-## macOS Development Note
+## Never Do
 
-A workaround is applied for V8 JIT compiler crash on macOS ARM64 (Electron 33 bug):
-```typescript
-app.commandLine.appendSwitch('js-flags', '--jitless --no-opt')
-```
-This trades some performance for stability.
+- NEVER apply a codemod (`npm run codemod:run`) without a prior successful dry-run in the same session.
+- NEVER use manual find-and-replace for multi-file AST migrations — write or run a codemod instead.
+- NEVER edit `.codemod/workflow.yaml` include/exclude globs without re-validating and dry-running.
+- NEVER skip post-run checks: `detect_changes()`, affected tests, and `npm run build` when app code changed.
 
-## Adding a New Provider
+## Commands
 
-### Overview
+| Command | Purpose |
+|---------|---------|
+| `npm run codemod:validate` | Validate workflow schema |
+| `npm run codemod:test` | Run codemod fixture tests |
+| `npm run codemod:dry-run` | Preview transforms (no writes) |
+| `npm run codemod:run` | Apply transforms to `src/` and `tests/` |
 
-Adding a new provider requires modifications across 4 layers: Provider Config, OAuth Authentication, Proxy Adapter, and UI. The following guide covers all necessary steps.
+## Layout
 
-### Core File Modification Checklist
-
-#### 1. Provider Config Layer (Required)
-
-| File | Purpose |
+| Path | Use for |
 |------|---------|
-| `src/main/providers/builtin/<provider>.ts` | Provider configuration definition |
-| `src/main/providers/builtin/index.ts` | Register provider in `builtinProviders` array |
-| `src/main/store/types.ts` | Sync to `BUILTIN_PROVIDERS` array |
-
-#### 2. OAuth Authentication Layer (Required)
-
-| File | Purpose |
-|------|---------|
-| `src/main/oauth/adapters/<provider>.ts` | OAuth adapter implementation |
-| `src/main/oauth/adapters/index.ts` | Register in `createAdapter()` and `getSupportedAuthMethods()` |
-| `src/main/oauth/types.ts` | Add to `MANUAL_TOKEN_CONFIGS` (optional) |
-
-#### 3. Proxy Adapter Layer (Required)
-
-| File | Purpose |
-|------|---------|
-| `src/main/proxy/adapters/<provider>.ts` | Proxy adapter implementation |
-| `src/main/proxy/adapters/<provider>-stream.ts` | Stream handler implementation |
-| `src/main/proxy/adapters/index.ts` | Export adapter |
-| `src/main/proxy/forwarder.ts` | Add `forward<Provider>()` method |
-
-#### 4. UI Layer (Required)
-
-| File | Purpose |
-|------|---------|
-| `src/renderer/src/i18n/locales/zh-CN.json` | Chinese translations |
-| `src/renderer/src/i18n/locales/en-US.json` | English translations |
-| `src/renderer/src/components/providers/ProviderCard.tsx` | Add icon mapping |
-| `src/assets/providers/<provider>.svg` | Provider icon file |
-
-### Step-by-Step Implementation
-
-#### Step 1: Provider Configuration
-
-```typescript
-// src/main/providers/builtin/<provider>.ts
-import type { BuiltinProviderConfig } from '../../store/types'
-
-export const providerConfig: BuiltinProviderConfig = {
-  id: 'provider-id',
-  name: 'Provider Name',
-  type: 'builtin',
-  authType: 'userToken',  // See AuthType section below
-  apiEndpoint: 'https://api.example.com',
-  chatPath: '/chat/completions',
-  headers: {
-    'Content-Type': 'application/json',
-    'Accept': '*/*',
-    'Origin': 'https://example.com',
-    'Referer': 'https://example.com/',
-  },
-  enabled: true,
-  description: 'Provider description',
-  supportedModels: ['Model-1', 'Model-2'],
-  modelMappings: {
-    'Model-1': 'model-1-id',
-    'Model-2': 'model-2-id',
-  },
-  credentialFields: [
-    {
-      name: 'token',
-      label: 'Token',
-      type: 'password',
-      required: true,
-      placeholder: 'Enter token',
-      helpText: 'How to get token',
-    },
-  ],
-  tokenCheckEndpoint: '/api/user',    // Optional
-  tokenCheckMethod: 'GET',            // Optional
-}
-
-export default providerConfig
-```
-
-#### Step 2: Register Provider
-
-```typescript
-// src/main/providers/builtin/index.ts
-import providerConfig from './provider'
-
-export const builtinProviders: BuiltinProviderConfig[] = [
-  // ...existing
-  providerConfig,
-]
-
-export const builtinProviderMap: Record<string, BuiltinProviderConfig> = {
-  // ...existing
-  'provider-id': providerConfig,
-}
-
-export { providerConfig }
-```
-
-**CRITICAL**: Must also update `src/main/store/types.ts` `BUILTIN_PROVIDERS` array with identical configuration.
-
-#### Step 3: OAuth Adapter
-
-```typescript
-// src/main/oauth/adapters/<provider>.ts
-import axios from 'axios'
-import { BaseOAuthAdapter } from './base'
-import { OAuthResult, OAuthOptions, TokenValidationResult, AdapterConfig } from '../types'
-
-const API_BASE = 'https://api.example.com'
-
-export class ProviderAdapter extends BaseOAuthAdapter {
-  constructor(config: AdapterConfig) {
-    super({
-      ...config,
-      providerType: 'provider-id',
-      authMethods: ['manual'],
-      loginUrl: API_BASE,
-      apiUrl: API_BASE,
-    })
-  }
-
-  async startLogin(options: OAuthOptions): Promise<OAuthResult> {
-    await shell.openExternal(API_BASE)
-    return {
-      success: false,
-      providerId: options.providerId,
-      error: 'Please log in via browser and enter Token manually',
-    }
-  }
-
-  async validateToken(credentials: Record<string, string>): Promise<TokenValidationResult> {
-    const token = credentials.token
-    if (!token) return { valid: false, error: 'Token cannot be empty' }
-
-    try {
-      const response = await axios.get(`${API_BASE}/api/user`, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 15000,
-        validateStatus: () => true,
-      })
-
-      if (response.status !== 200) {
-        return { valid: false, error: 'Token is invalid or expired' }
-      }
-
-      return {
-        valid: true,
-        tokenType: 'access',
-        accountInfo: {
-          userId: response.data.id,
-          email: response.data.email,
-          name: response.data.name,
-        },
-      }
-    } catch (error) {
-      return { valid: false, error: error instanceof Error ? error.message : 'Validation failed' }
-    }
-  }
-
-  async refreshToken(credentials: Record<string, string>) {
-    return null  // Optional
-  }
-}
-
-export default ProviderAdapter
-```
-
-#### Step 4: Register OAuth Adapter
-
-```typescript
-// src/main/oauth/adapters/index.ts
-export { ProviderAdapter } from './provider'
-
-export function createAdapter(providerType: ProviderType, config: AdapterConfig): BaseOAuthAdapter {
-  switch (providerType) {
-    // ...existing
-    case 'provider-id':
-      return new ProviderAdapter(config)
-    default:
-      throw new Error(`Unsupported provider type: ${providerType}`)
-  }
-}
-
-export function getSupportedAuthMethods(providerType: ProviderType): string[] {
-  switch (providerType) {
-    // ...existing
-    case 'provider-id':
-      return ['manual']
-    default:
-      return ['manual']
-  }
-}
-```
-
-#### Step 5: Proxy Adapter
-
-```typescript
-// src/main/proxy/adapters/<provider>.ts
-import axios, { AxiosResponse } from 'axios'
-import { Account, Provider } from '../../store/types'
-
-const API_BASE = 'https://api.example.com'
-
-export class ProviderAdapter {
-  private provider: Provider
-  private account: Account
-  private token: string
-
-  constructor(provider: Provider, account: Account) {
-    this.provider = provider
-    this.account = account
-    this.token = account.credentials.token || ''
-  }
-
-  async chatCompletion(request: ChatCompletionRequest): Promise<{
-    response: AxiosResponse
-    sessionId: string
-  }> {
-    // 1. Get/refresh token
-    // 2. Build request
-    // 3. Send request
-    // 4. Return response
-  }
-
-  async deleteSession(sessionId: string): Promise<boolean> {
-    return true
-  }
-
-  static isProviderProvider(provider: Provider): boolean {
-    return provider.id === 'provider-id' || provider.apiEndpoint.includes('example.com')
-  }
-}
-
-export const providerAdapter = { ProviderAdapter }
-```
-
-#### Step 6: Stream Handler
-
-```typescript
-// src/main/proxy/adapters/<provider>-stream.ts
-import { PassThrough } from 'stream'
-
-export class ProviderStreamHandler {
-  private model: string
-  private sessionId: string
-  private isFirstChunk: boolean = true
-  private created: number
-
-  constructor(model: string, sessionId: string, onEnd?: () => void) {
-    this.model = model
-    this.sessionId = sessionId
-    this.created = Math.floor(Date.now() / 1000)
-  }
-
-  async handleStream(stream: NodeJS.ReadableStream): Promise<NodeJS.ReadableStream> {
-    const transStream = new PassThrough()
-    
-    stream.on('data', (chunk: Buffer) => {
-      // Parse SSE data
-      // Convert to OpenAI format
-      // Write to transStream
-    })
-
-    stream.on('end', () => {
-      transStream.write('data: [DONE]\n\n')
-      transStream.end()
-    })
-
-    return transStream
-  }
-
-  async handleNonStream(stream: NodeJS.ReadableStream): Promise<any> {
-    // Collect all data
-    // Return OpenAI format response
-  }
-
-  private createChunk(delta: any, finishReason?: string): string {
-    return `data: ${JSON.stringify({
-      id: this.sessionId,
-      model: this.model,
-      object: 'chat.completion.chunk',
-      choices: [{ index: 0, delta, finish_reason: finishReason || null }],
-      created: this.created,
-    })}\n\n`
-  }
-}
-```
-
-#### Step 7: Register Proxy Adapter
-
-```typescript
-// src/main/proxy/adapters/index.ts
-export { ProviderAdapter, ProviderStreamHandler, providerAdapter } from './provider'
-```
-
-#### Step 8: Add Forwarder Method
-
-```typescript
-// src/main/proxy/forwarder.ts
-import { ProviderAdapter } from './adapters/provider'
-import { ProviderStreamHandler } from './adapters/provider-stream'
-
-// In doForward method, add check:
-if (ProviderAdapter.isProviderProvider(provider)) {
-  return this.forwardProvider(request, account, provider, actualModel, startTime, sessionContext)
-}
-
-// Add forward method:
-private async forwardProvider(
-  request: ChatCompletionRequest,
-  account: Account,
-  provider: Provider,
-  actualModel: string,
-  startTime: number,
-  sessionContext: SessionContext
-): Promise<ForwardResult> {
-  // Implementation
-}
-```
-
-#### Step 9: Add UI Translations
-
-```json
-// src/renderer/src/i18n/locales/zh-CN.json
-{
-  "provider-id": {
-    "name": "供应商名称",
-    "description": "供应商描述",
-    "token": "Token",
-    "tokenPlaceholder": "请输入 Token",
-    "tokenHelp": "从网页版获取 Token",
-    "models": {
-      "Model-1": "模型 1 描述"
-    }
-  }
-}
-```
-
-```json
-// src/renderer/src/i18n/locales/en-US.json
-{
-  "provider-id": {
-    "name": "Provider Name",
-    "description": "Provider description",
-    "token": "Token",
-    "tokenPlaceholder": "Enter token",
-    "tokenHelp": "Get token from web version",
-    "models": {
-      "Model-1": "Model 1 description"
-    }
-  }
-}
-```
-
-#### Step 10: Add Icon Mapping
-
-```typescript
-// src/renderer/src/components/providers/ProviderCard.tsx
-import providerIcon from '@/assets/providers/provider.svg'
-
-const providerIcons: Record<string, string> = {
-  // ...existing
-  'provider-id': providerIcon,
-}
-```
-
-### AuthType Reference
-
-| Type | Description | Providers | Credential Field |
-|------|-------------|-----------|------------------|
-| `userToken` | User Token | DeepSeek | `token` |
-| `jwt` | JWT Token | Kimi, MiniMax, Qwen AI, Z.ai | `token` |
-| `refresh_token` | Refresh Token | GLM | `refresh_token` |
-| `cookie` | Cookie Auth | Perplexity | `sessionToken` |
-| `tongyi_sso_ticket` | SSO Ticket | Qwen | `ticket` |
-| `token` | Generic Token | Z.ai | `token` |
-
-### Web Search Mode Implementation
-
-Three ways to enable web search:
-
-1. **Model Mapping**: Auto-enable via model name
-```typescript
-const modelLower = request.model.toLowerCase()
-if (modelLower.includes('search')) {
-  searchEnabled = true
-}
-```
-
-2. **Custom Parameter**: Via `web_search` parameter
-```typescript
-if (request.web_search) {
-  searchEnabled = true
-}
-```
-
-3. **Custom Header**: Via request header
-```typescript
-if (headers['X-Enable-Search']) {
-  searchEnabled = true
-}
-```
-
-### Thinking Mode Implementation
-
-Three ways to enable thinking mode:
-
-1. **Model Mapping**: Auto-enable via model name
-```typescript
-const modelLower = request.model.toLowerCase()
-if (modelLower.includes('r1') || modelLower.includes('think')) {
-  thinkingEnabled = true
-}
-```
-
-2. **Custom Parameter**: Via `reasoning_effort` parameter
-```typescript
-if (request.reasoning_effort) {
-  thinkingEnabled = true
-}
-```
-
-3. **Custom Header**: Via request header
-```typescript
-if (headers['X-Enable-Thinking']) {
-  thinkingEnabled = true
-}
-```
-
-### Thinking Content Handling
-
-In stream handler, output thinking content to `reasoning_content` field:
-
-```typescript
-if (path === 'thinking') {
-  delta.reasoning_content = processedContent
-} else {
-  delta.content = processedContent
-}
-```
-
-### Model List Synchronization
-
-**CRITICAL**: Model list must be defined in TWO locations:
-
-1. `src/main/providers/builtin/<provider>.ts` - `supportedModels` array
-2. `src/main/store/types.ts` - `BUILTIN_PROVIDERS` array
-
-Both must be identical, otherwise configuration won't take effect.
-
-### Testing Checklist
-
-- [ ] Provider displays correctly
-- [ ] Account can be added
-- [ ] Account validation works
-- [ ] Streaming chat works
-- [ ] Non-streaming chat works
-- [ ] Web search mode works
-- [ ] Thinking mode works
-- [ ] Model mapping works
-- [ ] Multi-turn conversation works
-- [ ] Session deletion works
-
-## Updating Provider Configuration
-
-When updating provider configuration (e.g., model list, description, help text), you MUST update **both** locations:
-
-1. **`src/main/providers/builtin/<provider>.ts`** - Provider config module
-2. **`src/main/store/types.ts`** - `BUILTIN_PROVIDERS` array
-
-The `initializeDefaultProviders()` method in `store.ts` syncs configuration from `BUILTIN_PROVIDERS` to persistent storage on app startup. If only one location is updated, the changes will not be reflected in the UI.
-
-Example: When updating Z.ai model list:
-```typescript
-// 1. src/main/providers/builtin/zai.ts
-supportedModels: ['GLM-5-Turbo', 'GLM-5', 'GLM-4.7', ...]
-
-// 2. src/main/store/types.ts (BUILTIN_PROVIDERS array)
-supportedModels: ['GLM-5-Turbo', 'GLM-5', 'GLM-4.7', ...]
-```
-
-**Important**: Users must restart the app after configuration updates to see the changes.
+| `.codemod/workflow.yaml` | Scan scope, language, entry script |
+| `.codemod/scripts/codemod.ts` | Production transform entrypoint |
+| `.codemod/scripts/examples/` | Reference transforms with tests |
+
+## Skills
+
+| Task | Read this skill file |
+|------|---------------------|
+| Run migrations safely | `.claude/skills/codemod/codemod-running/SKILL.md` |
+| Write new transforms | `.claude/skills/codemod/codemod-authoring/SKILL.md` |
+| CLI and tool selection | `.claude/skills/codemod/codemod-guide/SKILL.md` |
+
+<!-- codemod:end -->
+Must have "Sax báo cáo" at the end of  your response 

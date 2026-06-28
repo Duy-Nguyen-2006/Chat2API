@@ -5,7 +5,7 @@ export type ProviderStatus = 'online' | 'offline' | 'unknown'
 export type ProviderType = 'builtin' | 'custom'
 
 // Provider vendor type (for OAuth adapters)
-export type ProviderVendor = 'deepseek' | 'glm' | 'kimi' | 'mimo' | 'minimax' | 'qwen' | 'qwen-ai' | 'zai' | 'perplexity' | 'custom'
+export type ProviderVendor = 'chatgpt' | 'custom'
 
 export type AuthType = 
   | 'oauth' 
@@ -110,7 +110,7 @@ export interface AppConfig {
   toolPromptConfig?: LegacyToolPromptConfig
   managementApi: ManagementApiConfig
   contextManagement?: unknown
-  language: 'zh-CN' | 'en-US'
+  language?: 'zh-CN' | 'en-US'
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'

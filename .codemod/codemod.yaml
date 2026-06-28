@@ -1,0 +1,25 @@
+schema_version: "1.0"
+
+name: "chat2api-codemods"
+version: "0.1.0"
+description: "Chat2API codemods"
+author: "Chat2API Team <support@chat2api.com>"
+license: "GPL-3.0"
+
+
+targets:
+  # Keep this aligned with the files matched in workflow.yaml.
+  languages: ["typescript"]
+
+keywords: ["transformation", "migration"]
+
+registry:
+  access: "public"
+  visibility: "public"
+
+capabilities: []
+
+workflows:
+  - name: main
+    default: true
+    path: workflow.yaml

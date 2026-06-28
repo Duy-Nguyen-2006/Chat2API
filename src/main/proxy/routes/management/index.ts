@@ -11,8 +11,6 @@ import modelMappingsRouter from './modelMappings'
 import sessionsRouter from './sessions'
 import statisticsRouter from './statistics'
 import proxyRouter from './proxy'
-import toolCallingRouter from './toolCalling'
-
 export {
   configRouter,
   providersRouter,
@@ -22,7 +20,6 @@ export {
   sessionsRouter,
   statisticsRouter,
   proxyRouter,
-  toolCallingRouter,
 }
 
 export default [
@@ -34,5 +31,4 @@ export default [
   sessionsRouter,
   statisticsRouter,
   proxyRouter,
-  toolCallingRouter,
 ]
