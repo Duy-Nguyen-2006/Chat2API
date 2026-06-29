@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -41,42 +40,50 @@ func emailFromJWT(token string) string {
 	return claims.Profile.Email
 }
 
-func ProbeAccountHealth(ctx context.Context, creds Credentials) (status string, detail string) {
-	if creds.AccessToken == "" {
+// IsInconclusiveError reports upstream failures that do not prove the session
+// is dead (e.g. Cloudflare challenge, rate limit).
+func IsInconclusiveError(msg string) bool {
+	return isInconclusiveUpstream(msg)
+}
+
+func isInconclusiveUpstream(msg string) bool {
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(msg, "HTTP 403"),
+		strings.Contains(msg, "HTTP 429"),
+		strings.Contains(msg, "HTTP 502"),
+		strings.Contains(msg, "HTTP 503"),
+		strings.Contains(msg, "HTTP 504"):
+		return true
+	case strings.Contains(lower, "challenge"),
+		strings.Contains(lower, "cf_chl"),
+		strings.Contains(lower, "cloudflare"),
+		strings.Contains(lower, "unusual activity"):
+		return true
+	default:
+		return false
+	}
+}
+
+// ProbeHealth checks whether the account can reach ChatGPT workspaces.
+// Returns alive, dead, or unknown (upstream blocked — e.g. Cloudflare).
+func (c *Client) ProbeHealth(ctx context.Context) (status string, detail string) {
+	if c.accessToken == "" {
 		return "dead", "no access token"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+accountsCheckPath, nil)
+	list, err := c.ListWorkspaces(ctx)
 	if err != nil {
-		return "dead", err.Error()
-	}
-	client := NewClient(creds.AccessToken, creds.AccountID, creds.Cookie, creds.DeviceID)
-	req.Header = client.buildHeaders(nil)
-
-	resp, err := client.http.Do(req)
-	if err != nil {
-		return "dead", err.Error()
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return "dead", fmt.Sprintf("HTTP %d — session expired or blocked", resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "dead", fmt.Sprintf("HTTP %d: %s", resp.StatusCode, readLimitedBody(resp.Body))
-	}
-
-	var check accountsCheckResponse
-	if err := json.NewDecoder(resp.Body).Decode(&check); err != nil {
-		return "dead", "invalid response"
+		msg := err.Error()
+		if isInconclusiveUpstream(msg) {
+			return "unknown", msg
+		}
+		return "dead", msg
 	}
 
 	accessible := 0
-	for key, entry := range check.Accounts {
-		if key == "default" {
-			continue
-		}
-		if entry.CanAccessWithSession {
+	for _, w := range list.Data {
+		if w.CanAccess {
 			accessible++
 		}
 	}
@@ -84,6 +91,11 @@ func ProbeAccountHealth(ctx context.Context, creds Credentials) (status string, 
 		return "dead", "no accessible workspaces"
 	}
 	return "alive", fmt.Sprintf("%d workspace(s) accessible", accessible)
+}
+
+func ProbeAccountHealth(ctx context.Context, creds Credentials) (status string, detail string) {
+	client := NewClient(creds.AccessToken, creds.AccountID, creds.Cookie, creds.DeviceID)
+	return client.ProbeHealth(ctx)
 }
 
 func BuildAccountStatus(id, label, cookiesFile string, creds Credentials) AccountStatus {

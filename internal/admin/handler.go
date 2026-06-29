@@ -1,11 +1,13 @@
 package admin
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/account"
@@ -13,6 +15,11 @@ import (
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/config"
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/httpclient"
+)
+
+const (
+	errInvalidRequestBody  = "invalid request body"
+	errAuthServiceNotInit  = "auth service not initialised"
 )
 
 //go:embed web/*
@@ -56,11 +63,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 // accountView is the admin-facing summary shape (redacts sensitive fields).
 type accountView struct {
 	ID              string `json:"id"`
+	Label           string `json:"label"`
 	Email           string `json:"email,omitempty"`
 	AccountID       string `json:"account_id,omitempty"`
 	Type            string `json:"type"`
 	SourceType      string `json:"source_type,omitempty"`
-	Status          string `json:"status"`
+	Status          string `json:"status"` // alive | dead (session probe)
+	StatusDetail    string `json:"status_detail,omitempty"`
+	CheckedAt       string `json:"checked_at,omitempty"`
+	CookiesFile     string `json:"cookies_file,omitempty"`
 	Quota           int    `json:"quota"`
 	RestoreAt       string `json:"restore_at,omitempty"`
 	InvalidCount    int    `json:"invalid_count,omitempty"`
@@ -80,6 +91,7 @@ func toView(a *account.Account) accountView {
 	}
 	v := accountView{
 		ID:              account.DisplayName(a),
+		Label:           accountLabel(a),
 		Email:           a.Email,
 		AccountID:       a.AccountID,
 		Type:            string(a.Type),
@@ -100,12 +112,36 @@ func toView(a *account.Account) accountView {
 	return v
 }
 
-// handleAccounts returns the current pool state (censored).
-func (h *Handler) handleAccounts(w http.ResponseWriter, _ *http.Request) {
-	items := h.pool.List()
+func accountLabel(a *account.Account) string {
+	if a == nil {
+		return ""
+	}
+	if a.Email != "" {
+		return a.Email
+	}
+	if a.CookiesFile != "" {
+		return filepath.Base(a.CookiesFile)
+	}
+	return account.DisplayName(a)
+}
+
+// poolDisplayStatus maps pool lifecycle status to admin alive/dead when a
+// live probe cannot reach ChatGPT (e.g. Cloudflare challenge).
+func poolDisplayStatus(s account.Status) (status string, detail string) {
+	switch s {
+	case account.StatusError, account.StatusDisabled:
+		return "dead", "pool: " + string(s)
+	default:
+		return "alive", "pool: " + string(s)
+	}
+}
+
+// handleAccounts returns pool accounts with a live session health probe.
+func (h *Handler) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	items := h.pool.Snapshot()
 	views := make([]accountView, 0, len(items))
 	for _, a := range items {
-		views = append(views, toView(a))
+		views = append(views, h.accountViewWithHealth(r.Context(), a))
 	}
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
@@ -114,12 +150,39 @@ func (h *Handler) handleAccounts(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (h *Handler) accountViewWithHealth(ctx context.Context, a *account.Account) accountView {
+	v := toView(a)
+	cookie := a.Cookie
+	cookiesFile := account.CookiesPath(a, h.cfg.CookiesFile)
+	if cookie == "" && cookiesFile != "" {
+		cookie = chatgpt.OptionalCookieHeader(cookiesFile)
+	}
+	v.CookiesFile = cookiesFile
+
+	fp := httpclient.NewFingerprint()
+	client := chatgpt.NewClientWith(a.AccessToken, a.AccountID, cookie, fp, h.pool.HTTPClient())
+	probeStatus, probeDetail := client.ProbeHealth(ctx)
+	switch probeStatus {
+	case "alive":
+		v.Status = "alive"
+		v.StatusDetail = probeDetail
+	case "unknown":
+		v.Status, v.StatusDetail = poolDisplayStatus(a.Status)
+		v.StatusDetail += " (live probe blocked)"
+	default:
+		v.Status = probeStatus
+		v.StatusDetail = probeDetail
+	}
+	v.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	return v
+}
+
 // handleAccountCreate adds a new account to the pool. Body is a partial
 // account.Account; required fields are access_token and (optionally) email.
 func (h *Handler) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	var in account.Account
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid request body")
+		h.writeError(w, http.StatusBadRequest, errInvalidRequestBody)
 		return
 	}
 	if in.AccessToken == "" {
@@ -170,45 +233,66 @@ func (h *Handler) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *Handler) resolveAccount(id string) (*account.Account, error) {
+	for _, a := range h.pool.Snapshot() {
+		if account.DisplayName(a) == id {
+			return a, nil
+		}
+	}
+	return nil, fmt.Errorf("account %q not found", id)
+}
+
 // resolveAccountAccessToken picks the account by admin-supplied id and
 // returns its access_token. The id matches the email or token-prefix view.
 // Uses Snapshot() (not List()) so the matched AccessToken is the real key,
 // not a redacted copy.
 func (h *Handler) resolveAccountAccessToken(id string) (string, error) {
-	for _, a := range h.pool.Snapshot() {
-		if account.DisplayName(a) == id {
-			return a.AccessToken, nil
-		}
+	a, err := h.resolveAccount(id)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("account %q not found", id)
+	return a.AccessToken, nil
 }
 
 // chatgptClientFor builds a chatgpt.Client using the shared TLS-impersonating
 // HTTP client and a fresh fingerprint. Mirrors the server.clientFor helper
 // but bound to the admin handler.
 func (h *Handler) chatgptClientFor(token string) (*chatgpt.Client, error) {
-	for _, a := range h.pool.List() {
+	for _, a := range h.pool.Snapshot() {
 		if a.AccessToken == token {
 			fp := httpclient.NewFingerprint()
-			return chatgpt.NewClientWith(a.AccessToken, a.AccountID, a.Cookie, fp, h.pool.HTTPClient()), nil
+			cookie := a.Cookie
+			cookiesFile := account.CookiesPath(a, h.cfg.CookiesFile)
+			if cookie == "" && cookiesFile != "" {
+				cookie = chatgpt.OptionalCookieHeader(cookiesFile)
+			}
+			return chatgpt.NewClientWith(a.AccessToken, a.AccountID, cookie, fp, h.pool.HTTPClient()), nil
 		}
 	}
 	return nil, fmt.Errorf("token not in pool")
 }
 
 func (h *Handler) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
-	token, err := h.resolveAccountAccessToken(r.PathValue("id"))
+	acc, err := h.resolveAccount(r.PathValue("id"))
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	client, err := h.chatgptClientFor(token)
+	client, err := h.chatgptClientFor(acc.AccessToken)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	list, err := client.ListWorkspaces(r.Context())
 	if err != nil {
+		if chatgpt.IsInconclusiveError(err.Error()) && acc.AccountID != "" {
+			title := acc.Email
+			if title == "" {
+				title = accountLabel(acc)
+			}
+			h.writeJSON(w, http.StatusOK, chatgpt.FallbackWorkspaceList(acc.AccountID, title))
+			return
+		}
 		h.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -233,8 +317,15 @@ func (h *Handler) handleGPTs(w http.ResponseWriter, r *http.Request) {
 		accountID = client.AccountIDForRequest()
 	}
 
-	list, err := client.WithAccountID(accountID).ListGizmos(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	list, err := client.WithAccountID(accountID).ListGizmos(ctx)
 	if err != nil {
+		if chatgpt.IsInconclusiveError(err.Error()) {
+			h.writeJSON(w, http.StatusOK, chatgpt.GizmoList{Object: "list", Data: nil})
+			return
+		}
 		h.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -249,14 +340,16 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		WorkspaceID string            `json:"workspace_id"`
-		GizmoID     string            `json:"gizmo_id,omitempty"`
-		Model       string            `json:"model"`
-		Messages    []chatgpt.Message `json:"messages"`
-		Stream      bool              `json:"stream"`
+		WorkspaceID     string            `json:"workspace_id"`
+		GizmoID         string            `json:"gizmo_id,omitempty"`
+		Model           string            `json:"model"`
+		Messages        []chatgpt.Message `json:"messages"`
+		Stream          bool              `json:"stream"`
+		ConversationID  string            `json:"conversation_id,omitempty"`
+		ParentMessageID string            `json:"parent_message_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid request body")
+		h.writeError(w, http.StatusBadRequest, errInvalidRequestBody)
 		return
 	}
 	if body.Model == "" {
@@ -278,11 +371,15 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	client = client.WithAccountID(accountID)
 
+	saveHistory := h.cfg.SaveChatHistory
 	req := chatgpt.ChatRequest{
-		Model:    body.Model,
-		GizmoID:  body.GizmoID,
-		Messages: body.Messages,
-		Stream:   body.Stream,
+		Model:           body.Model,
+		GizmoID:         body.GizmoID,
+		Messages:        body.Messages,
+		Stream:          body.Stream,
+		ConversationID:  body.ConversationID,
+		ParentMessageID: body.ParentMessageID,
+		SaveChatHistory: &saveHistory,
 	}
 
 	var resp *http.Response
@@ -309,7 +406,12 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	h.writeJSON(w, http.StatusOK, handler.ReadNonStream(resp.Body))
+	result := handler.ReadNonStream(resp.Body)
+	if errMsg, _ := result["error"].(string); errMsg != "" {
+		h.writeError(w, http.StatusBadGateway, errMsg)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -354,7 +456,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.auth == nil {
-		h.writeError(w, http.StatusServiceUnavailable, "auth service not initialised")
+		h.writeError(w, http.StatusServiceUnavailable, errAuthServiceNotInit)
 		return
 	}
 	var body struct {
@@ -362,7 +464,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		Role auth.Role `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		h.writeError(w, http.StatusBadRequest, "invalid request body")
+		h.writeError(w, http.StatusBadRequest, errInvalidRequestBody)
 		return
 	}
 	pub, raw, err := h.auth.CreateKey(body.Role, body.Name)
@@ -382,7 +484,7 @@ func (h *Handler) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.auth == nil {
-		h.writeError(w, http.StatusServiceUnavailable, "auth service not initialised")
+		h.writeError(w, http.StatusServiceUnavailable, errAuthServiceNotInit)
 		return
 	}
 	if !h.auth.DeleteKey(r.PathValue("id")) {
@@ -405,7 +507,7 @@ func (h *Handler) toggleKey(w http.ResponseWriter, r *http.Request, enabled bool
 		return
 	}
 	if h.auth == nil {
-		h.writeError(w, http.StatusServiceUnavailable, "auth service not initialised")
+		h.writeError(w, http.StatusServiceUnavailable, errAuthServiceNotInit)
 		return
 	}
 	if !h.auth.SetEnabled(r.PathValue("id"), enabled) {

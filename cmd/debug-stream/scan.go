@@ -23,23 +23,43 @@ func mainScan() {
 
 	keys := []string{"run_command", "list_dir", "read_file", "lgmmo", "machine", "duy.lgmmo", "screenshot", "system_info"}
 	for _, id := range list.Apps {
-		if !strings.HasPrefix(id, "asdk_app_") && !strings.HasPrefix(id, "connector_") { continue }
-		body := scanFetch(creds, "/backend-api/apps/"+id)
-		lower := strings.ToLower(body)
-		for _, k := range keys {
-			if strings.Contains(lower, k) {
-				fmt.Println("MATCH", k, id)
-				var m map[string]any
-				if json.Unmarshal([]byte(body), &m) == nil {
-					for _, field := range []string{"name", "url", "description", "server_url", "mcp_url"} {
-						if v, _ := m[field].(string); v != "" { fmt.Printf("  %s: %s\n", field, v) }
-					}
-					if disp, _ := m["display"].(map[string]any); disp != nil {
-						if n, _ := disp["name"].(string); n != "" { fmt.Println("  display.name:", n) }
-					}
-				}
-				break
-			}
+		scanAppMatch(creds, id, keys)
+	}
+}
+
+func scanAppMatch(creds chatgpt.Credentials, id string, keys []string) {
+	if !strings.HasPrefix(id, "asdk_app_") && !strings.HasPrefix(id, "connector_") {
+		return
+	}
+	body := scanFetch(creds, "/backend-api/apps/"+id)
+	if key := firstMatchingKey(strings.ToLower(body), keys); key != "" {
+		fmt.Println("MATCH", key, id)
+		printAppDetails(body)
+	}
+}
+
+func firstMatchingKey(lowerBody string, keys []string) string {
+	for _, k := range keys {
+		if strings.Contains(lowerBody, k) {
+			return k
+		}
+	}
+	return ""
+}
+
+func printAppDetails(body string) {
+	var m map[string]any
+	if json.Unmarshal([]byte(body), &m) != nil {
+		return
+	}
+	for _, field := range []string{"name", "url", "description", "server_url", "mcp_url"} {
+		if v, _ := m[field].(string); v != "" {
+			fmt.Printf("  %s: %s\n", field, v)
+		}
+	}
+	if disp, _ := m["display"].(map[string]any); disp != nil {
+		if n, _ := disp["name"].(string); n != "" {
+			fmt.Println("  display.name:", n)
 		}
 	}
 }

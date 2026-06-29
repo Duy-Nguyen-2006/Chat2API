@@ -27,6 +27,15 @@ type Credentials struct {
 	Cookie      string
 }
 
+// OptionalCookieHeader returns the Cookie header from path, or "" on error.
+func OptionalCookieHeader(path string) string {
+	header, err := LoadCookieHeader(path)
+	if err != nil {
+		return ""
+	}
+	return header
+}
+
 func LoadCookieHeader(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -96,7 +105,7 @@ func ResolveCredentials(accessToken, accountID, cookiesFile string) (Credentials
 		return creds, nil
 	}
 
-	token, err := fetchAccessToken(creds.Cookie)
+	token, err := fetchAccessToken(creds.Cookie, creds.DeviceID)
 	if err != nil {
 		return creds, err
 	}
@@ -104,39 +113,42 @@ func ResolveCredentials(accessToken, accountID, cookiesFile string) (Credentials
 	return creds, nil
 }
 
-func fetchAccessToken(cookieHeader string) (string, error) {
+func fetchAccessToken(cookieHeader, deviceID string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/auth/session", nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Accept", "application/json")
 	fp := httpclient.NewFingerprint()
-	req.Header.Set("User-Agent", fp.UserAgent)
-	req.Header.Set("Cookie", cookieHeader)
-
-	// Use the TLS-impersonating client so the session endpoint isn't blocked
-	// by Cloudflare when cookies are the only credential.
-	var doer httpclient.Doer
-	opts := httpclient.DefaultOptions()
-	opts.TimeoutSeconds = 30
-	c, err := httpclient.New(opts)
-	if err != nil {
-		doer = http.DefaultClient
-	} else {
-		doer = c
+	if deviceID != "" {
+		fp.DeviceID = deviceID
 	}
-	resp, err := doer.Do(req)
+	h := make(http.Header)
+	h.Set("Accept", mimeApplicationJSON)
+	h.Set("Referer", baseURL+"/")
+	h.Set("Origin", baseURL)
+	if fp.UserAgent != "" {
+		h.Set("User-Agent", fp.UserAgent)
+	}
+	if fp.DeviceID != "" {
+		h.Set("Oai-Device-Id", fp.DeviceID)
+	}
+	h.Set("Cookie", cookieHeader)
+	req.Header = h
+
+	// Stdlib client works better here — the TLS-impersonating transport often
+	// receives Cloudflare challenge pages on /api/auth/session (see sessionDo).
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("session endpoint HTTP %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("session endpoint %s", SanitizeUpstreamError(resp.StatusCode, string(body)))
 	}
 
 	var session sessionResponse

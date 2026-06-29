@@ -62,26 +62,41 @@ func mainGizmoKeys() {
 func walkHits(v any, prefix string, needles []string) {
 	switch x := v.(type) {
 	case map[string]any:
-		for k, child := range x {
-			path := prefix + k
-			kl := strings.ToLower(k)
-			for _, n := range needles {
-				if strings.Contains(kl, n) || strings.Contains(strings.ToLower(fmt.Sprint(child)), n) {
-					b, _ := json.Marshal(child)
-					if len(b) > 400 {
-						b = append(b[:400], []byte("...")...)
-					}
-					fmt.Printf("  %s = %s\n", path, string(b))
-					break
-				}
-			}
-			if len(path) < 80 {
-				walkHits(child, path+".", needles)
-			}
-		}
+		walkMapHits(x, prefix, needles)
 	case []any:
 		for i, child := range x {
 			walkHits(child, fmt.Sprintf("%s[%d].", prefix, i), needles)
 		}
 	}
+}
+
+func walkMapHits(m map[string]any, prefix string, needles []string) {
+	for k, child := range m {
+		path := prefix + k
+		if hit := needleHit(k, child, needles); hit {
+			printHit(path, child)
+		}
+		if len(path) < 80 {
+			walkHits(child, path+".", needles)
+		}
+	}
+}
+
+func needleHit(key string, child any, needles []string) bool {
+	kl := strings.ToLower(key)
+	childText := strings.ToLower(fmt.Sprint(child))
+	for _, n := range needles {
+		if strings.Contains(kl, n) || strings.Contains(childText, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func printHit(path string, child any) {
+	b, _ := json.Marshal(child)
+	if len(b) > 400 {
+		b = append(b[:400], []byte("...")...)
+	}
+	fmt.Printf("  %s = %s\n", path, string(b))
 }

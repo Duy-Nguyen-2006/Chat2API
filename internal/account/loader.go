@@ -86,10 +86,17 @@ func (l *Loader) Save(accounts []*Account) error {
 // access_token is fetched via /api/auth/session (requires cookies to be
 // valid; errors are returned to the caller).
 func MigrateFromCookies(cookiesFile string) (*Account, error) {
+	return MigrateFromCookiesWithToken(cookiesFile, "")
+}
+
+// MigrateFromCookiesWithToken builds an Account from a cookie export. When
+// accessToken is non-empty (e.g. CHATGPT_ACCESS_TOKEN from .env) the session
+// endpoint is skipped — useful when Cloudflare blocks /api/auth/session.
+func MigrateFromCookiesWithToken(cookiesFile, accessToken string) (*Account, error) {
 	// We use the chatgpt package helpers — avoids duplicating cookie parsing
 	// in this package and lets the caller refresh the access token via the
 	// same TLS-impersonating client the rest of the app uses.
-	creds, err := chatgpt.ResolveCredentials("", "", cookiesFile)
+	creds, err := chatgpt.ResolveCredentials(accessToken, "", cookiesFile)
 	if err != nil {
 		return nil, fmt.Errorf("account: resolve cookies: %w", err)
 	}
@@ -101,6 +108,7 @@ func MigrateFromCookies(cookiesFile string) (*Account, error) {
 		AccountID:   creds.AccountID,
 		DeviceID:    creds.DeviceID,
 		Cookie:      creds.Cookie,
+		CookiesFile: cookiesFile,
 		Status:      StatusNormal,
 		SourceType:  "cookies",
 		CreatedAt:   time.Now(),

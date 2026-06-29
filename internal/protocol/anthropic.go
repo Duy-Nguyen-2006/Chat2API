@@ -22,6 +22,8 @@ import (
 	"github.com/Duy-Nguyen-2006/Chat2API/internal/chatgpt"
 )
 
+const sseDataPrefix = "data: "
+
 // AnthropicMessageRequest mirrors the upstream body shape we care about.
 type AnthropicMessageRequest struct {
 	Model     string                 `json:"model"`
@@ -63,19 +65,34 @@ type AnthropicMessageResponse struct {
 // HandleAnthropicMessages routes an Anthropic-shaped request to the
 // chatgpt pipeline and transcribes the response.
 func HandleAnthropicMessages(w http.ResponseWriter, r *http.Request, gen *chatgpt.Client) {
+	body, err := parseAnthropicRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request")
+		return
+	}
+	req := anthropicToChatRequest(body)
+	if body.Stream {
+		writeAnthropicSSE(w, r, gen, req)
+		return
+	}
+	writeAnthropicJSON(w, r, gen, req, body.Model)
+}
+
+func parseAnthropicRequest(r *http.Request) (AnthropicMessageRequest, error) {
 	var body AnthropicMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "invalid_request")
-		return
+		return body, fmt.Errorf("invalid request body")
 	}
 	if body.Model == "" {
 		body.Model = "auto"
 	}
 	if len(body.Messages) == 0 {
-		writeError(w, http.StatusBadRequest, "messages required", "missing_messages")
-		return
+		return body, fmt.Errorf("messages required")
 	}
+	return body, nil
+}
 
+func anthropicToChatRequest(body AnthropicMessageRequest) chatgpt.ChatRequest {
 	messages := make([]chatgpt.Message, 0, len(body.Messages)+1)
 	if body.System != "" {
 		messages = append(messages, chatgpt.Message{Role: "system", Content: body.System})
@@ -83,18 +100,10 @@ func HandleAnthropicMessages(w http.ResponseWriter, r *http.Request, gen *chatgp
 	for _, m := range body.Messages {
 		messages = append(messages, chatgpt.Message{Role: m.Role, Content: m.Content})
 	}
+	return chatgpt.ChatRequest{Model: body.Model, Messages: messages, Stream: body.Stream}
+}
 
-	req := chatgpt.ChatRequest{
-		Model:    body.Model,
-		Messages: messages,
-		Stream:   body.Stream,
-	}
-
-	if body.Stream {
-		writeAnthropicSSE(w, r, gen, req)
-		return
-	}
-
+func writeAnthropicJSON(w http.ResponseWriter, r *http.Request, gen *chatgpt.Client, req chatgpt.ChatRequest, model string) {
 	resp, err := gen.Conversation(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "upstream_error")
@@ -107,29 +116,27 @@ func HandleAnthropicMessages(w http.ResponseWriter, r *http.Request, gen *chatgp
 	}
 	handler := chatgpt.NewStreamWriter(req.Model)
 	completion := handler.ReadNonStream(resp.Body)
-
-	// Extract the assistant text from the OpenAI-shaped completion.
-	text := ""
-	if choices, ok := completion["choices"].([]any); ok {
-		if len(choices) > 0 {
-			if ch, ok := choices[0].(map[string]any); ok {
-				if msg, ok := ch["message"].(map[string]any); ok {
-					text, _ = msg["content"].(string)
-				}
-			}
-		}
-	}
-
 	out := AnthropicMessageResponse{
 		ID:         fmt.Sprintf("msg_%d", time.Now().UnixNano()),
 		Type:       "message",
 		Role:       "assistant",
-		Content:    []AnthropicContent{{Type: "text", Text: text}},
-		Model:      body.Model,
+		Content:    []AnthropicContent{{Type: "text", Text: assistantTextFromCompletion(completion)}},
+		Model:      model,
 		StopReason: "end_turn",
 		Usage:      AnthropicUsage{InputTokens: 0, OutputTokens: 0},
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func assistantTextFromCompletion(completion map[string]any) string {
+	choices, ok := completion["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return ""
+	}
+	ch, _ := choices[0].(map[string]any)
+	msg, _ := ch["message"].(map[string]any)
+	text, _ := msg["content"].(string)
+	return text
 }
 
 // writeAnthropicSSE streams Anthropic-shaped events. Reads OpenAI chunks
@@ -182,10 +189,10 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, gen *chatgpt.Clie
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, sseDataPrefix) {
 			continue
 		}
-		payload := strings.TrimSpace(line[len("data: "):])
+		payload := strings.TrimSpace(line[len(sseDataPrefix):])
 		if payload == "" || payload == "[DONE]" {
 			continue
 		}
@@ -224,7 +231,7 @@ func writeAnthropicSSE(w http.ResponseWriter, r *http.Request, gen *chatgpt.Clie
 func writeAnthropicEvent(w http.ResponseWriter, flusher http.Flusher, ev map[string]any) {
 	b, _ := json.Marshal(ev)
 	_, _ = w.Write([]byte("event: " + ev["type"].(string) + "\n"))
-	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write([]byte(sseDataPrefix))
 	_, _ = w.Write(b)
 	_, _ = w.Write([]byte("\n\n"))
 	flusher.Flush()

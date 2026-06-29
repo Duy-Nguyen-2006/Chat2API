@@ -10,8 +10,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source.
-COPY . .
+# Copy source (explicit paths avoid pulling secrets from the build context).
+COPY cmd/ cmd/
+COPY internal/ internal/
 
 # Static build with stripped symbol table for smaller binary.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
@@ -21,10 +22,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 # ─── Runtime stage ───────────────────────────────────────────────────────────
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
-
-# Run as non-root.
-RUN addgroup -S chat2api && adduser -S chat2api -G chat2api
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S chat2api && adduser -S chat2api -G chat2api
 USER chat2api
 
 WORKDIR /home/chat2api

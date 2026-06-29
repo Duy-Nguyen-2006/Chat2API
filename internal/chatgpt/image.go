@@ -65,7 +65,7 @@ func (c *Client) PrepareImageConversation(ctx context.Context, prompt, model str
 	if err != nil {
 		return "", err
 	}
-	req.Header = c.buildHeaders(map[string]string{"Accept": "application/json", "Content-Type": "application/json"})
+	req.Header = c.buildHeaders(jsonAcceptHeaders())
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", err
@@ -103,7 +103,7 @@ func (c *Client) UploadImage(ctx context.Context, image string) (*FileRef, error
 	if err != nil {
 		return nil, err
 	}
-	req.Header = c.buildHeaders(map[string]string{"Accept": "application/json", "Content-Type": "application/json"})
+	req.Header = c.buildHeaders(jsonAcceptHeaders())
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("image-register: %w", err)
@@ -128,7 +128,7 @@ func (c *Client) UploadImage(ctx context.Context, image string) (*FileRef, error
 	if err != nil {
 		return nil, err
 	}
-	uploadReq.Header.Set("Content-Type", mimeType)
+	uploadReq.Header.Set(headerContentType, mimeType)
 	uploadReq.Header.Set("x-ms-blob-type", "BlockBlob")
 	uploadReq.Header.Set("x-ms-version", "2020-04-08")
 	uploadReq.Header.Set("Origin", baseURL)
@@ -136,7 +136,7 @@ func (c *Client) UploadImage(ctx context.Context, image string) (*FileRef, error
 	if ua := c.fp.UserAgent; ua != "" {
 		uploadReq.Header.Set("User-Agent", ua)
 	}
-	uploadReq.Header.Set("Accept", "application/json, text/plain, */*")
+	uploadReq.Header.Set("Accept", mimeApplicationJSON+", text/plain, */*")
 	uploadResp, err := c.http.Do(uploadReq)
 	if err != nil {
 		return nil, fmt.Errorf("image-upload: %w", err)
@@ -147,11 +147,11 @@ func (c *Client) UploadImage(ctx context.Context, image string) (*FileRef, error
 	}
 
 	// Step 3: mark uploaded.
-	finalReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/backend-api/files/"+reg.FileID+"/uploaded", strings.NewReader("{}"))
+	finalReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+backendAPIFilesPath+reg.FileID+"/uploaded", strings.NewReader("{}"))
 	if err != nil {
 		return nil, err
 	}
-	finalReq.Header = c.buildHeaders(map[string]string{"Accept": "application/json", "Content-Type": "application/json"})
+	finalReq.Header = c.buildHeaders(jsonAcceptHeaders())
 	finalResp, err := c.http.Do(finalReq)
 	if err != nil {
 		return nil, fmt.Errorf("image-finalize: %w", err)
@@ -231,8 +231,8 @@ func (c *Client) StartImageGeneration(ctx context.Context, prompt, model, condui
 		return nil, err
 	}
 	extra := map[string]string{
-		"Accept":      "text/event-stream",
-		"Content-Type": "application/json",
+		"Accept":          "text/event-stream",
+		headerContentType: mimeApplicationJSON,
 		"X-Conduit-Token": conduitToken,
 	}
 	req.Header = c.buildHeaders(extra)
@@ -275,6 +275,10 @@ func (c *Client) PollImageResults(ctx context.Context, conversationID string, op
 		return nil, ctx.Err()
 	}
 
+	return c.pollImageUntilStable(ctx, conversationID, opts)
+}
+
+func (c *Client) pollImageUntilStable(ctx context.Context, conversationID string, opts ImagePollOptions) (*PollImageResult, error) {
 	deadline := time.Now().Add(opts.Timeout)
 	interval := opts.PollInterval
 	const maxInterval = 16 * time.Second
@@ -286,9 +290,8 @@ func (c *Client) PollImageResults(ctx context.Context, conversationID string, op
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("%w: no file ids within %s", ErrImagePollTimeout, opts.Timeout)
 		}
-		conv, err := c.fetchConversation(ctx, conversationID)
+		files, sediments, done, err := c.pollImageOnce(ctx, conversationID, lastFileIDs, &stableHits, stableThreshold)
 		if err != nil {
-			// Treat 404/409/423/429/5xx as transient and back off.
 			if isTransientConversationErr(err) {
 				time.Sleep(interval)
 				interval = nextBackoff(interval, maxInterval)
@@ -296,19 +299,8 @@ func (c *Client) PollImageResults(ctx context.Context, conversationID string, op
 			}
 			return nil, err
 		}
-		files, sediments := extractImageArtifacts(conv)
-		// Stable detection: file ids unchanged across two consecutive polls.
-		cur := joinSorted(files)
-		if cur != "" && cur == joinSorted(lastFileIDsAsSlice(lastFileIDs)) {
-			stableHits++
-		} else {
-			stableHits = 1
-		}
-		lastFileIDs = make(map[string]bool, len(files))
-		for _, id := range files {
-			lastFileIDs[id] = true
-		}
-		if cur != "" && stableHits >= stableThreshold {
+		lastFileIDs = fileIDsToSet(files)
+		if done {
 			return &PollImageResult{
 				FileIDs:        files,
 				SedimentIDs:    sediments,
@@ -320,15 +312,38 @@ func (c *Client) PollImageResults(ctx context.Context, conversationID string, op
 	}
 }
 
+func (c *Client) pollImageOnce(ctx context.Context, conversationID string, lastFileIDs map[string]bool, stableHits *int, stableThreshold int) (files, sediments []string, done bool, err error) {
+	conv, err := c.fetchConversation(ctx, conversationID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	files, sediments = extractImageArtifacts(conv)
+	cur := joinSorted(files)
+	if cur != "" && cur == joinSorted(lastFileIDsAsSlice(lastFileIDs)) {
+		*stableHits++
+	} else {
+		*stableHits = 1
+	}
+	return files, sediments, cur != "" && *stableHits >= stableThreshold, nil
+}
+
+func fileIDsToSet(files []string) map[string]bool {
+	out := make(map[string]bool, len(files))
+	for _, id := range files {
+		out[id] = true
+	}
+	return out
+}
+
 // ResolveImageURLs asks the upstream for a downloadable URL for each file_id.
 func (c *Client) ResolveImageURLs(ctx context.Context, fileIDs []string) ([]string, error) {
 	out := make([]string, 0, len(fileIDs))
 	for _, id := range fileIDs {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/backend-api/files/"+id+"/download", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+backendAPIFilesPath+id+"/download", nil)
 		if err != nil {
 			return nil, err
 		}
-		req.Header = c.buildHeaders(map[string]string{"Accept": "application/json"})
+		req.Header = c.buildHeaders(map[string]string{"Accept": mimeApplicationJSON})
 		resp, err := c.http.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("file-download %s: %w", id, err)
@@ -348,7 +363,7 @@ func (c *Client) ResolveImageURLs(ctx context.Context, fileIDs []string) ([]stri
 		url := dl.DownloadURL
 		if url == "" {
 			// Fall back to a stable direct URL the browser accepts.
-			url = baseURL + "/backend-api/files/" + id + "/download"
+			url = baseURL + backendAPIFilesPath + id + "/download"
 		}
 		out = append(out, url)
 	}
@@ -362,7 +377,7 @@ func (c *Client) fetchConversation(ctx context.Context, conversationID string) (
 	if err != nil {
 		return nil, err
 	}
-	req.Header = c.buildHeaders(map[string]string{"Accept": "application/json"})
+	req.Header = c.buildHeaders(map[string]string{"Accept": mimeApplicationJSON})
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -397,52 +412,75 @@ func extractImageArtifacts(conv map[string]any) (files, sediments []string) {
 		return nil, nil
 	}
 	for _, node := range mapping {
-		nodeMap, ok := node.(map[string]any)
+		f, s := imageArtifactsFromNode(node)
+		files = append(files, f...)
+		sediments = append(sediments, s...)
+	}
+	return dedup(files), dedup(sediments)
+}
+
+func imageArtifactsFromNode(node any) (files, sediments []string) {
+	nodeMap, ok := node.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	msg, _ := nodeMap["message"].(map[string]any)
+	if msg == nil || !isImageArtifactRole(msg) {
+		return nil, nil
+	}
+	metadata, _ := msg["metadata"].(map[string]any)
+	if metadata == nil {
+		return nil, nil
+	}
+	return fileIDsFromContent(msg), sedimentIDsFromMetadata(metadata)
+}
+
+func isImageArtifactRole(msg map[string]any) bool {
+	author, _ := msg["author"].(map[string]any)
+	role, _ := author["role"].(string)
+	return role == "tool" || role == "assistant"
+}
+
+func fileIDsFromContent(msg map[string]any) []string {
+	content, ok := msg["content"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	parts, ok := content["parts"].([]any)
+	if !ok {
+		return nil
+	}
+	var files []string
+	for _, p := range parts {
+		pm, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
-		msg, _ := nodeMap["message"].(map[string]any)
-		if msg == nil {
+		ap, ok := pm["asset_pointer"].(string)
+		if !ok || !strings.HasPrefix(ap, "file-service://") {
 			continue
 		}
-		author, _ := msg["author"].(map[string]any)
-		if role, _ := author["role"].(string); role != "tool" && role != "assistant" {
+		files = append(files, strings.TrimPrefix(ap, "file-service://"))
+	}
+	return files
+}
+
+func sedimentIDsFromMetadata(metadata map[string]any) []string {
+	attachments, ok := metadata["attachments"].([]any)
+	if !ok {
+		return nil
+	}
+	var sediments []string
+	for _, a := range attachments {
+		am, ok := a.(map[string]any)
+		if !ok {
 			continue
 		}
-		metadata, _ := msg["metadata"].(map[string]any)
-		if metadata == nil {
-			continue
-		}
-		// file-service ids appear in image_asset_pointer parts.
-		if content, ok := msg["content"].(map[string]any); ok {
-			if parts, ok := content["parts"].([]any); ok {
-				for _, p := range parts {
-					pm, ok := p.(map[string]any)
-					if !ok {
-						continue
-					}
-					if ap, ok := pm["asset_pointer"].(string); ok {
-						if strings.HasPrefix(ap, "file-service://") {
-							files = append(files, strings.TrimPrefix(ap, "file-service://"))
-						}
-					}
-				}
-			}
-		}
-		// sediment ids appear in attachments.
-		if attachments, ok := metadata["attachments"].([]any); ok {
-			for _, a := range attachments {
-				am, ok := a.(map[string]any)
-				if !ok {
-					continue
-				}
-				if id, ok := am["id"].(string); ok && id != "" {
-					sediments = append(sediments, id)
-				}
-			}
+		if id, ok := am["id"].(string); ok && id != "" {
+			sediments = append(sediments, id)
 		}
 	}
-	return dedup(files), dedup(sediments)
+	return sediments
 }
 
 func dedup(in []string) []string {

@@ -12,7 +12,7 @@ type pendingApproval struct {
 }
 
 func parsePendingApproval(raw map[string]any) *pendingApproval {
-	msg, _ := raw["message"].(map[string]any)
+	msg := streamMessageFromRaw(raw)
 	if msg == nil {
 		return nil
 	}
@@ -51,17 +51,22 @@ func extractOperationHash(fromServer map[string]any) string {
 	if op, ok := body["operation"].(string); ok && op != "" {
 		return op
 	}
-	if actions, ok := body["actions"].([]any); ok {
-		for _, a := range actions {
-			action, _ := a.(map[string]any)
-			if action == nil {
-				continue
-			}
-			if always, ok := action["always_allow"].(map[string]any); ok {
-				if h, ok := always["operation_hash"].(string); ok && h != "" {
-					return h
-				}
-			}
+	return operationHashFromActions(body["actions"])
+}
+
+func operationHashFromActions(actionsRaw any) string {
+	actions, ok := actionsRaw.([]any)
+	if !ok {
+		return ""
+	}
+	for _, a := range actions {
+		action, _ := a.(map[string]any)
+		if action == nil {
+			continue
+		}
+		always, _ := action["always_allow"].(map[string]any)
+		if h, ok := always["operation_hash"].(string); ok && h != "" {
+			return h
 		}
 	}
 	return ""
@@ -99,7 +104,7 @@ func buildApprovalMessage(approval pendingApproval) map[string]any {
 }
 
 func parseSSEPayload(line string) (map[string]any, bool) {
-	if !strings.HasPrefix(line, "data: ") {
+	if !strings.HasPrefix(line, sseDataPrefix) {
 		return nil, false
 	}
 	payload := strings.TrimSpace(line[6:])

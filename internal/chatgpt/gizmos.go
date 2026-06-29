@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 type Gizmo struct {
@@ -22,6 +23,12 @@ type GizmoList struct {
 	Data   []Gizmo `json:"data"`
 }
 
+var gizmoListSources = []string{
+	"/backend-api/gizmos/pinned",
+	"/backend-api/gizmos/snorlax/sidebar",
+	"/backend-api/gizmos/bootstrap",
+}
+
 func extractGizmoID(model string) string {
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if strings.HasPrefix(lower, "g-p-") || strings.HasPrefix(lower, "g-") {
@@ -36,24 +43,23 @@ func extractGizmoID(model string) string {
 	return ""
 }
 
+func (c *Client) fetchGizmoSource(ctx context.Context, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = c.buildAccountListHeaders()
+	return c.sessionDo(req)
+}
+
 // ListGizmosRaw performs all gizmo discovery requests and returns the first
 // non-error response (callers can use it directly when retries aren't needed).
 // It mirrors ListGizmos but returns the raw upstream response from the first
 // successful endpoint.
 func (c *Client) ListGizmosRaw(ctx context.Context) (*http.Response, error) {
-	sources := []string{
-		"/backend-api/gizmos/pinned",
-		"/backend-api/gizmos/snorlax/sidebar",
-		"/backend-api/gizmos/bootstrap",
-	}
 	var lastErr error
-	for _, path := range sources {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header = c.buildHeaders(nil)
-		resp, err := c.http.Do(req)
+	for _, path := range gizmoListSources {
+		resp, err := c.fetchGizmoSource(ctx, path)
 		if err != nil {
 			lastErr = err
 			continue
@@ -87,18 +93,103 @@ func DecodeGizmoList(resp *http.Response) (GizmoList, error) {
 	return GizmoList{Object: "list", Data: data}, nil
 }
 
-func (c *Client) ListGizmos(ctx context.Context) (GizmoList, error) {
-	resp, err := c.ListGizmosRaw(ctx)
-	if err != nil {
-		return GizmoList{}, err
+// WarmGizmoSession hits the bootstrap endpoint so upstream registers gizmo
+// connectors/tools for the session. Errors are ignored (best-effort).
+func (c *Client) WarmGizmoSession(ctx context.Context, gizmoID string) error {
+	if gizmoID == "" {
+		return nil
 	}
-	defer resp.Body.Close()
-	return DecodeGizmoList(resp)
+	path := "/backend-api/gizmos/bootstrap?gizmo_id=" + gizmoID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header = c.buildHeaders(nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func (c *Client) ListGizmos(ctx context.Context) (GizmoList, error) {
+	seen := map[string]Gizmo{}
+	var (
+		mu      sync.Mutex
+		lastErr error
+		wg      sync.WaitGroup
+	)
+	for _, path := range gizmoListSources {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			resp, err := c.fetchGizmoSource(ctx, path)
+			if err != nil {
+				mu.Lock()
+				lastErr = err
+				mu.Unlock()
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				mu.Lock()
+				lastErr = fmt.Errorf("%s HTTP %d", path, resp.StatusCode)
+				mu.Unlock()
+				resp.Body.Close()
+				return
+			}
+			list, decErr := DecodeGizmoList(resp)
+			resp.Body.Close()
+			if decErr != nil {
+				mu.Lock()
+				lastErr = decErr
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			mergeGizmos(seen, list.Data)
+		}(path)
+	}
+	wg.Wait()
+	if len(seen) == 0 {
+		if lastErr != nil {
+			return GizmoList{}, lastErr
+		}
+		return GizmoList{Object: "list", Data: nil}, nil
+	}
+	data := make([]Gizmo, 0, len(seen))
+	for _, g := range seen {
+		data = append(data, g)
+	}
+	return GizmoList{Object: "list", Data: data}, nil
+}
+
+func mergeGizmos(seen map[string]Gizmo, items []Gizmo) {
+	for _, g := range items {
+		if g.ID == "" {
+			continue
+		}
+		if prev, ok := seen[g.ID]; ok {
+			if prev.Name == "" && g.Name != "" {
+				prev.Name = g.Name
+			}
+			if prev.Description == "" && g.Description != "" {
+				prev.Description = g.Description
+			}
+			seen[g.ID] = prev
+			continue
+		}
+		seen[g.ID] = g
+	}
 }
 
 func walkGizmos(v any, seen map[string]Gizmo) {
 	switch x := v.(type) {
 	case map[string]any:
+		if nested, ok := x["gizmo"].(map[string]any); ok {
+			walkGizmos(nested, seen)
+		}
 		if id, ok := x["id"].(string); ok && isGizmoID(id) {
 			if _, exists := seen[id]; !exists {
 				seen[id] = gizmoFromMap(x)

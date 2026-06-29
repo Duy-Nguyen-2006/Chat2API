@@ -116,6 +116,26 @@ func (p *Pool) Upsert(a *Account) {
 	}
 }
 
+// RemoveByCookiesFile deletes every account sourced from the given cookies export.
+func (p *Pool) RemoveByCookiesFile(cookiesFile string) {
+	if cookiesFile == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for tok, a := range p.accounts {
+		if a.CookiesFile == cookiesFile {
+			delete(p.accounts, tok)
+			delete(p.imageInflight, tok)
+		}
+	}
+	for k, v := range p.tokenAliases {
+		if _, ok := p.accounts[v]; !ok {
+			delete(p.tokenAliases, k)
+		}
+	}
+}
+
 // Remove deletes the account with the given access token from the pool and
 // drops any aliases that pointed to it.
 func (p *Pool) Remove(accessToken string) {
@@ -181,48 +201,47 @@ func (p *Pool) GetTextToken(ctx context.Context, excluded []string) (*Account, e
 // Blocks (via imageCond.Wait) until a slot frees, or returns
 // ErrNoAvailableAccount if no account can satisfy the request.
 func (p *Pool) GetImageToken(ctx context.Context, planType PlanType) (*Account, error) {
-	// Use a goroutine + timer so we don't block forever on an empty pool.
-	done := make(chan struct{})
-	var (
-		acc *Account
-		err error
-	)
+	done := make(chan *Account)
 	go func() {
 		defer close(done)
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		for {
-			// Try to acquire a slot.
-			for tok, a := range p.accounts {
-				if !a.Available(true) {
-					continue
-				}
-				if planType != "" && a.Type != planType {
-					continue
-				}
-				if p.imageInflight[tok] >= p.opts.ImageConcurrency {
-					continue
-				}
-				// Found a candidate.
-				p.imageInflight[tok]++
-				p.index++
-				_ = a
-				acc = a
-				a.LastUsedAt = time.Now()
+			if acc := p.tryAcquireImageSlot(planType); acc != nil {
+				done <- acc
 				return
 			}
-			// Wait for a release signal. Timeout to honour ctx.
 			timer := time.AfterFunc(2*time.Second, func() { p.imageCond.Broadcast() })
 			p.imageCond.Wait()
 			timer.Stop()
 		}
 	}()
 	select {
-	case <-done:
-		return acc, err
+	case acc := <-done:
+		return acc, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// tryAcquireImageSlot picks an account with a free image slot. Caller must hold p.mu.
+func (p *Pool) tryAcquireImageSlot(planType PlanType) *Account {
+	for tok, a := range p.accounts {
+		if !a.Available(true) {
+			continue
+		}
+		if planType != "" && a.Type != planType {
+			continue
+		}
+		if p.imageInflight[tok] >= p.opts.ImageConcurrency {
+			continue
+		}
+		p.imageInflight[tok]++
+		p.index++
+		a.LastUsedAt = time.Now()
+		return a
+	}
+	return nil
 }
 
 // ReleaseImageSlot decrements the in-flight counter for token and wakes any

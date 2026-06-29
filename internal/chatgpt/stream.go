@@ -7,18 +7,8 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"strings"
 	"time"
 )
-
-type streamEvent struct {
-	Message *struct {
-		Author  *struct{ Role string } `json:"author"`
-		Content *struct {
-			Parts []string `json:"parts"`
-		} `json:"content"`
-	} `json:"message"`
-}
 
 func generateChatID() string {
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -29,36 +19,11 @@ func generateChatID() string {
 	return "chatcmpl-" + string(b)
 }
 
+// ExtractDelta returns assistant text accumulated so far from one SSE line.
 func ExtractDelta(line string) string {
-	if !strings.HasPrefix(line, "data: ") {
-		return ""
-	}
-	payload := strings.TrimSpace(line[6:])
-	if payload == "[DONE]" {
-		return ""
-	}
-
-	var event streamEvent
-	if err := json.Unmarshal([]byte(payload), &event); err != nil {
-		return ""
-	}
-	if event.Message == nil {
-		return ""
-	}
-	if event.Message.Author != nil {
-		role := event.Message.Author.Role
-		if role == "user" || role == "system" {
-			return ""
-		}
-	}
-	if event.Message.Content == nil || len(event.Message.Content.Parts) == 0 {
-		return ""
-	}
-	text := strings.Join(event.Message.Content.Parts, "")
-	if text == "" {
-		return ""
-	}
-	return text
+	var acc string
+	_ = streamChunkFromLine(line, &acc)
+	return acc
 }
 
 type StreamWriter struct {
@@ -67,6 +32,7 @@ type StreamWriter struct {
 	created     int64
 	sentRole    bool
 	accumulated string
+	meta        StreamMeta
 }
 
 func NewStreamWriter(model string) *StreamWriter {
@@ -94,7 +60,7 @@ func (sw *StreamWriter) chunk(content string, finishReason *string) string {
 		"model":   sw.model,
 		"choices": []any{choice},
 	})
-	return "data: " + string(body) + "\n\n"
+	return sseDataPrefix + string(body) + "\n\n"
 }
 
 func (sw *StreamWriter) roleChunk() string {
@@ -109,21 +75,37 @@ func (sw *StreamWriter) roleChunk() string {
 			"finish_reason": nil,
 		}},
 	})
-	return "data: " + string(body) + "\n\n"
+	return sseDataPrefix + string(body) + "\n\n"
+}
+
+func (sw *StreamWriter) metaChunk() string {
+	out := map[string]any{
+		"id":      sw.chatID,
+		"object":  "chat.completion.chunk",
+		"created": sw.created,
+		"model":   sw.model,
+		"choices": []any{map[string]any{
+			"index":         0,
+			"delta":         map[string]any{},
+			"finish_reason": nil,
+		}},
+	}
+	if sw.meta.ConversationID != "" {
+		out["conversation_id"] = sw.meta.ConversationID
+	}
+	if sw.meta.ParentMessageID != "" {
+		out["parent_message_id"] = sw.meta.ParentMessageID
+	}
+	body, _ := json.Marshal(out)
+	return sseDataPrefix + string(body) + "\n\n"
 }
 
 func (sw *StreamWriter) processLine(line string) string {
-	delta := ExtractDelta(line)
-	if delta == "" {
-		return ""
+	raw, ok := parseSSEPayload(line)
+	if ok {
+		sw.meta.ingestRaw(raw)
 	}
-	prev := len(sw.accumulated)
-	if len(delta) <= prev {
-		return ""
-	}
-	newContent := delta[prev:]
-	sw.accumulated = delta
-	return newContent
+	return streamChunkFromLine(line, &sw.accumulated)
 }
 
 func (sw *StreamWriter) WriteToOpenAI(w http.ResponseWriter, body io.Reader) error {
@@ -143,9 +125,14 @@ func (sw *StreamWriter) WriteToOpenAI(w http.ResponseWriter, body io.Reader) err
 	}
 
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var streamErr string
 	for scanner.Scan() {
-		if chunk := sw.processLine(scanner.Text()); chunk != "" {
+		line := scanner.Text()
+		if errMsg := extractStreamError(line); errMsg != "" {
+			streamErr = errMsg
+		}
+		if chunk := sw.processLine(line); chunk != "" {
 			fmt.Fprint(w, sw.chunk(chunk, nil))
 			flusher.Flush()
 		}
@@ -153,10 +140,26 @@ func (sw *StreamWriter) WriteToOpenAI(w http.ResponseWriter, body io.Reader) err
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	if streamErr != "" && sw.accumulated == "" {
+		errBody, _ := json.Marshal(map[string]string{"error": streamErr})
+		fmt.Fprint(w, sseDataPrefix+string(errBody)+"\n\n")
+		flusher.Flush()
+		return fmt.Errorf("%s", streamErr)
+	}
+	if sw.accumulated == "" && !sw.meta.sawStreamData {
+		errBody, _ := json.Marshal(map[string]string{"error": "upstream returned an empty response (Cloudflare or session expired)"})
+		fmt.Fprint(w, sseDataPrefix+string(errBody)+"\n\n")
+		flusher.Flush()
+		return fmt.Errorf("empty upstream response")
+	}
 
+	if sw.meta.ConversationID != "" || sw.meta.ParentMessageID != "" {
+		fmt.Fprint(w, sw.metaChunk())
+		flusher.Flush()
+	}
 	stop := "stop"
 	fmt.Fprint(w, sw.chunk("", &stop))
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	fmt.Fprint(w, sseDataPrefix+"[DONE]\n\n")
 	flusher.Flush()
 	return nil
 }
@@ -164,13 +167,25 @@ func (sw *StreamWriter) WriteToOpenAI(w http.ResponseWriter, body io.Reader) err
 func (sw *StreamWriter) ReadNonStream(body io.Reader) map[string]any {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var streamErr string
 	for scanner.Scan() {
-		if delta := ExtractDelta(scanner.Text()); len(delta) > len(sw.accumulated) {
-			sw.accumulated = delta
+		line := scanner.Text()
+		if raw, ok := parseSSEPayload(line); ok {
+			sw.meta.ingestRaw(raw)
 		}
+		if errMsg := extractStreamError(line); errMsg != "" {
+			streamErr = errMsg
+		}
+		_ = streamChunkFromLine(line, &sw.accumulated)
+	}
+	if streamErr != "" && sw.accumulated == "" {
+		return map[string]any{"error": streamErr}
+	}
+	if sw.accumulated == "" && !sw.meta.sawStreamData {
+		return map[string]any{"error": "upstream returned an empty response (Cloudflare or session expired)"}
 	}
 
-	return map[string]any{
+	out := map[string]any{
 		"id":      sw.chatID,
 		"object":  "chat.completion",
 		"created": sw.created,
@@ -189,4 +204,22 @@ func (sw *StreamWriter) ReadNonStream(body io.Reader) map[string]any {
 			"total_tokens":      0,
 		},
 	}
+	if sw.meta.ConversationID != "" {
+		out["conversation_id"] = sw.meta.ConversationID
+	}
+	if sw.meta.ParentMessageID != "" {
+		out["parent_message_id"] = sw.meta.ParentMessageID
+	}
+	return out
+}
+
+func extractStreamError(line string) string {
+	raw, ok := parseSSEPayload(line)
+	if !ok {
+		return ""
+	}
+	if errMsg, _ := raw["error"].(string); errMsg != "" {
+		return errMsg
+	}
+	return ""
 }

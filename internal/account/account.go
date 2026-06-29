@@ -51,9 +51,10 @@ type Account struct {
 	Password     string `json:"password,omitempty"` // used only when AutoRelogin is enabled
 
 	// Identity & billing.
-	Type       PlanType `json:"type"`
-	SourceType string   `json:"source_type,omitempty"` // web | codex | sub2api | cpa
-	Status     Status   `json:"status"`
+	Type        PlanType `json:"type"`
+	SourceType  string   `json:"source_type,omitempty"` // web | codex | sub2api | cpa | cookies
+	CookiesFile string   `json:"cookies_file,omitempty"`
+	Status      Status   `json:"status"`
 	Proxy      string   `json:"proxy,omitempty"`
 
 	// Quota (image generation).

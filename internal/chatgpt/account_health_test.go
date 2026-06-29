@@ -40,3 +40,20 @@ func TestProbeAccountHealth_NoToken(t *testing.T) {
 		t.Errorf("got (%q,%q), want (dead, ...)", status, detail)
 	}
 }
+
+func TestIsInconclusiveUpstream(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"accounts/check HTTP 403: challenge", true},
+		{"accounts/check HTTP 401: unauthorized", false},
+		{"accounts/check HTTP 429: rate limited", true},
+		{"no access token", false},
+	}
+	for _, tc := range cases {
+		if got := isInconclusiveUpstream(tc.msg); got != tc.want {
+			t.Errorf("isInconclusiveUpstream(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
+}

@@ -26,6 +26,9 @@ const (
 	maxTokenRetries  = 3
 	serverVersion    = "4.0.0"
 	serverDescription = "ChatGPT-only OpenAI API compatible proxy (Go) with account pool, TLS fingerprint bypass, and storage abstraction"
+
+	errNoAccountsShort = "No ChatGPT accounts configured."
+	errNoAccountsFull  = "No ChatGPT accounts configured. Add cookies_*.json under auth/, set CHATGPT_ACCESS_TOKEN, or add to accounts.json."
 )
 
 type Server struct {
@@ -34,6 +37,7 @@ type Server struct {
 	loader      *account.Loader
 	auth        *auth.Service
 	authMW      *auth.Middleware
+	disableAuth bool // effective flag (may auto-enable for local dev)
 	store       storage.Backend
 	watcherStop func()
 	mux         *http.ServeMux
@@ -57,9 +61,6 @@ func New(cfg config.Config) (*Server, error) {
 		ImageConcurrency:  cfg.ImageConcurrency,
 		AutoRemoveInvalid: cfg.AutoRemoveInvalid,
 	})
-
-	// Storage backend (json default, optional sqlite). Persists both the
-	// account pool and the auth key registry.
 	store, err := storage.New(storage.Config{
 		Type:         storage.Type(cfg.StorageType),
 		DataDir:      cfg.StorageDir,
@@ -69,57 +70,20 @@ func New(cfg config.Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: build storage: %w", err)
 	}
-
-	// Hydrate the pool from storage.
-	stored, err := store.LoadAccounts()
-	if err != nil {
-		return nil, fmt.Errorf("server: load accounts: %w", err)
+	if err := hydrateAccountPool(pool, store, cfg); err != nil {
+		return nil, err
 	}
-	for _, a := range stored {
-		pool.Upsert(a)
-	}
-
-	// Fallback: legacy env-driven single account, migrated on first start.
-	if pool.Size() == 0 {
-		if acc, mErr := migrateLegacyAccount(cfg); mErr == nil && acc != nil {
-			pool.Upsert(acc)
-			if err := store.SaveAccounts(pool.Snapshot()); err != nil {
-				fmt.Printf("[Server] warning: persist migrated account: %v\n", err)
-			}
-			fmt.Printf("[Server] Migrated legacy credentials into storage\n")
-		} else if mErr != nil {
-			fmt.Printf("[Server] No legacy credentials to migrate: %v\n", mErr)
-		}
-	}
-
-	if pool.Size() == 0 {
-		fmt.Println("[Server] Warning: no ChatGPT accounts in pool. Set CHATGPT_ACCESS_TOKEN, COOKIES_FILE, or POST to /admin/api/accounts.")
-	} else {
-		fmt.Printf("[Server] Account pool loaded with %d account(s) (storage=%s)\n", pool.Size(), store.Info()["type"])
-	}
-
-	// Auth service + middleware. When DISABLE_AUTH is set we still build
-	// the service so admin endpoints can manage keys, but the middleware
-	// becomes a no-op (Wrapped returns the bare handler).
-	authSvc := auth.NewService(cfg.AuthKey)
-	if storedKeys, kErr := store.LoadAuthKeys(); kErr != nil {
-		fmt.Printf("[Server] warning: load auth keys: %v\n", kErr)
-	} else if len(storedKeys) > 0 {
-		authSvc.LoadKeys(storedKeys)
-	}
-	authMW := auth.NewMiddleware(authSvc)
-	if cfg.DisableAuth {
-		fmt.Println("[Server] WARNING: API authentication is DISABLED (DISABLE_AUTH=true). Do not expose this server publicly.")
-	}
+	authSvc, authMW, disableAuth := buildAuthStack(cfg, store)
 
 	s := &Server{
-		cfg:    cfg,
-		pool:   pool,
-		loader: account.NewLoader(cfg.AccountsFile),
-		auth:   authSvc,
-		authMW: authMW,
-		store:  store,
-		mux:    http.NewServeMux(),
+		cfg:         cfg,
+		pool:        pool,
+		loader:      account.NewLoader(cfg.AccountsFile),
+		auth:        authSvc,
+		authMW:      authMW,
+		disableAuth: disableAuth,
+		store:       store,
+		mux:         http.NewServeMux(),
 	}
 	s.routes()
 
@@ -130,6 +94,73 @@ func New(cfg config.Config) (*Server, error) {
 
 	admin.NewHandler(cfg, pool, s.loader, authSvc).Register(s.mux)
 	return s, nil
+}
+
+func hydrateAccountPool(pool *account.Pool, store storage.Backend, cfg config.Config) error {
+	stored, err := store.LoadAccounts()
+	if err != nil {
+		return fmt.Errorf("server: load accounts: %w", err)
+	}
+	for _, a := range stored {
+		pool.Upsert(a)
+	}
+	if n, err := account.HydrateFromAuthDir(pool, cfg.AuthDir, cfg.ChatGPTToken); err != nil {
+		fmt.Printf("[Server] auth dir %q: %v\n", cfg.AuthDir, err)
+	} else if n > 0 {
+		fmt.Printf("[Server] Loaded %d account(s) from %s/\n", n, cfg.AuthDir)
+		if err := store.SaveAccounts(pool.Snapshot()); err != nil {
+			fmt.Printf("[Server] warning: persist auth-dir accounts: %v\n", err)
+		}
+	}
+	if pool.Size() == 0 {
+		migrateLegacyIntoPool(pool, store, cfg)
+	}
+	logPoolStatus(pool, store)
+	return nil
+}
+
+func migrateLegacyIntoPool(pool *account.Pool, store storage.Backend, cfg config.Config) {
+	acc, mErr := migrateLegacyAccount(cfg)
+	if mErr != nil {
+		fmt.Printf("[Server] No legacy credentials to migrate: %v\n", mErr)
+		return
+	}
+	if acc == nil {
+		return
+	}
+	pool.Upsert(acc)
+	if err := store.SaveAccounts(pool.Snapshot()); err != nil {
+		fmt.Printf("[Server] warning: persist migrated account: %v\n", err)
+	}
+	fmt.Printf("[Server] Migrated legacy credentials into storage\n")
+}
+
+func logPoolStatus(pool *account.Pool, store storage.Backend) {
+	if pool.Size() == 0 {
+		fmt.Println("[Server] Warning: no ChatGPT accounts in pool. Add cookies_*.json under auth/, set CHATGPT_ACCESS_TOKEN, or POST to /admin/api/accounts.")
+		return
+	}
+	fmt.Printf("[Server] Account pool loaded with %d account(s) (storage=%s)\n", pool.Size(), store.Info()["type"])
+}
+
+func buildAuthStack(cfg config.Config, store storage.Backend) (*auth.Service, *auth.Middleware, bool) {
+	authSvc := auth.NewService(cfg.AuthKey)
+	storedKeys, kErr := store.LoadAuthKeys()
+	if kErr != nil {
+		fmt.Printf("[Server] warning: load auth keys: %v\n", kErr)
+	} else if len(storedKeys) > 0 {
+		authSvc.LoadKeys(storedKeys)
+	}
+	disable := cfg.DisableAuth
+	if !disable && cfg.AuthKey == "" && len(storedKeys) == 0 {
+		fmt.Println("[Server] No AUTH_KEY configured — API auth disabled for local dev.")
+		fmt.Println("[Server] Set AUTH_KEY in .env before exposing this server publicly.")
+		disable = true
+	}
+	if disable && cfg.DisableAuth {
+		fmt.Println("[Server] WARNING: API authentication is DISABLED (DISABLE_AUTH=true). Do not expose this server publicly.")
+	}
+	return authSvc, auth.NewMiddleware(authSvc), disable
 }
 
 // migrateLegacyAccount builds an Account from CHATGPT_ACCESS_TOKEN or
@@ -192,7 +223,7 @@ func (s *Server) ListenAndServe() error {
 	// Layer order: cors → authMW → mux. Public endpoints (set in auth)
 	// pass through authMW untouched.
 	var handler http.Handler = s.cors(s.mux)
-	if !s.cfg.DisableAuth {
+	if !s.disableAuth {
 		handler = s.authMW.Wrap(handler)
 	}
 	s.httpServer = &http.Server{
@@ -204,7 +235,7 @@ func (s *Server) ListenAndServe() error {
 	fmt.Printf("[Server] Chat2API v%s listening on http://%s\n", serverVersion, addr)
 	fmt.Println("[Server] Endpoints: POST /v1/chat/completions, GET /v1/models, GET /v1/workspaces, GET /v1/gpts, GET /admin/")
 	authState := "enabled"
-	if s.cfg.DisableAuth {
+	if s.disableAuth {
 		authState = "DISABLED"
 	}
 	fmt.Printf("[Server] Auth: %s  Storage: %s\n", authState, s.store.Info()["type"])
@@ -281,7 +312,12 @@ func (s *Server) clientFor(ctx context.Context, accountID string) (*chatgpt.Clie
 		return nil, nil, err
 	}
 	fp := httpclient.NewFingerprint()
-	c := chatgpt.NewClientWith(acc.AccessToken, acc.AccountID, acc.Cookie, fp, s.pool.HTTPClient())
+	cookie := acc.Cookie
+	cookiesFile := account.CookiesPath(acc, s.cfg.CookiesFile)
+	if cookie == "" && cookiesFile != "" {
+		cookie = chatgpt.OptionalCookieHeader(cookiesFile)
+	}
+	c := chatgpt.NewClientWith(acc.AccessToken, acc.AccountID, cookie, fp, s.pool.HTTPClient())
 	if accountID != "" {
 		c = c.WithAccountID(accountID)
 	}
@@ -354,7 +390,12 @@ func (s *Server) clientForImage(ctx context.Context) (*chatgpt.Client, func(), e
 		return nil, nil, err
 	}
 	fp := httpclient.NewFingerprint()
-	c := chatgpt.NewClientWith(acc.AccessToken, acc.AccountID, acc.Cookie, fp, s.pool.HTTPClient())
+	cookie := acc.Cookie
+	cookiesFile := account.CookiesPath(acc, s.cfg.CookiesFile)
+	if cookie == "" && cookiesFile != "" {
+		cookie = chatgpt.OptionalCookieHeader(cookiesFile)
+	}
+	c := chatgpt.NewClientWith(acc.AccessToken, acc.AccountID, cookie, fp, s.pool.HTTPClient())
 	return c, func() { s.pool.ReleaseImageSlot(acc.AccessToken) }, nil
 }
 
@@ -447,7 +488,7 @@ func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 	if s.pool.Size() == 0 {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured. Set CHATGPT_ACCESS_TOKEN, COOKIES_FILE, or add to accounts.json.", "no_available_account")
+		s.writeError(w, http.StatusServiceUnavailable, errNoAccountsFull, "no_available_account")
 		return
 	}
 	resp, err := s.doWithRetry(r.Context(), accountIDFromRequest(r), func(c *chatgpt.Client) (*http.Response, error) {
@@ -466,7 +507,7 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGPTs(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 	if s.pool.Size() == 0 {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured. Set CHATGPT_ACCESS_TOKEN, COOKIES_FILE, or add to accounts.json.", "no_available_account")
+		s.writeError(w, http.StatusServiceUnavailable, errNoAccountsFull, "no_available_account")
 		return
 	}
 	resp, err := s.doWithRetry(r.Context(), accountIDFromRequest(r), func(c *chatgpt.Client) (*http.Response, error) {
@@ -485,7 +526,7 @@ func (s *Server) handleGPTs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 	if s.pool.Size() == 0 {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured. Set CHATGPT_ACCESS_TOKEN, COOKIES_FILE, or add to accounts.json.", "no_available_account")
+		s.writeError(w, http.StatusServiceUnavailable, errNoAccountsFull, "no_available_account")
 		return
 	}
 
@@ -501,6 +542,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if len(req.Messages) == 0 {
 		s.writeError(w, http.StatusBadRequest, "Missing required field: messages", "")
 		return
+	}
+	if req.SaveChatHistory == nil {
+		saveHistory := s.cfg.SaveChatHistory
+		req.SaveChatHistory = &saveHistory
 	}
 
 	ctx := r.Context()
@@ -540,7 +585,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 	if s.pool.Size() == 0 {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured.", "no_available_account")
+		s.writeError(w, http.StatusServiceUnavailable, errNoAccountsShort, "no_available_account")
 		return
 	}
 	c, release, err := s.clientForImage(r.Context())
@@ -561,7 +606,7 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 	if s.pool.Size() == 0 {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured.", "no_available_account")
+		s.writeError(w, http.StatusServiceUnavailable, errNoAccountsShort, "no_available_account")
 		return
 	}
 	c, release, err := s.clientForImage(r.Context())
@@ -619,7 +664,7 @@ func (s *Server) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
 	if s.pool.Size() == 0 {
-		s.writeError(w, http.StatusServiceUnavailable, "No ChatGPT accounts configured.", "no_available_account")
+		s.writeError(w, http.StatusServiceUnavailable, errNoAccountsShort, "no_available_account")
 		return
 	}
 	gen, acc, err := s.clientFor(r.Context(), accountIDFromRequest(r))

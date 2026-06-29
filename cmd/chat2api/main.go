@@ -17,7 +17,7 @@ func main() {
 
 	if cfg.ChatGPTToken == "" {
 		fmt.Println("[Server] Warning: CHATGPT_ACCESS_TOKEN is not set.")
-		fmt.Printf("         Will try cookies from %s if present.\n", cfg.CookiesFile)
+		fmt.Printf("         Will load cookies from %s/ and %s if present.\n", cfg.AuthDir, cfg.CookiesFile)
 	}
 
 	srv, err := server.New(cfg)

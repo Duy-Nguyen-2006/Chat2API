@@ -15,25 +15,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "apps" {
-		dumpApps()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "probe" {
-		mainProbe()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "gizmo" {
-		os.Args = append(os.Args, "gizmo-only")
-		mainProbe()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "gizmo-keys" {
-		mainGizmoKeys()
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "scan" {
-		mainScan()
+	if dispatchCommand() {
 		return
 	}
 	cfg := config.Load()
@@ -68,64 +50,7 @@ func main() {
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		payload := strings.TrimSpace(line[6:])
-		if payload == "[DONE]" {
-			fmt.Println(line)
-			break
-		}
-		var raw map[string]any
-		if err := json.Unmarshal([]byte(payload), &raw); err != nil {
-			fmt.Println(line)
-			continue
-		}
-		// Print compact summary of interesting fields
-		msg, _ := raw["message"].(map[string]any)
-		if msg != nil {
-			author, _ := msg["author"].(map[string]any)
-			content, _ := msg["content"].(map[string]any)
-			meta, _ := msg["metadata"].(map[string]any)
-			fmt.Printf("type=%v status=%v role=%v recipient=%v content_type=%v end_turn=%v\n",
-				raw["type"], msg["status"], author["role"], msg["recipient"],
-				content["content_type"], msg["end_turn"])
-			if meta != nil {
-				for _, k := range []string{
-					"command", "finished_text", "initial_text", "aggregate_result",
-					"tool_invoked", "tool_name", "invoked_plugin", "invoked_resource",
-					"jit_plugin_data", "request_id", "permissions", "approval",
-				} {
-					if v, ok := meta[k]; ok {
-						b, _ := json.Marshal(v)
-						if len(b) > 2 {
-							fmt.Printf("  meta.%s=%s\n", k, string(b))
-						}
-					}
-				}
-			}
-			if parts, ok := content["parts"].([]any); ok && len(parts) > 0 {
-				b, _ := json.Marshal(parts)
-				if len(b) > 300 {
-					b = append(b[:300], []byte("...")...)
-				}
-				fmt.Printf("  parts=%s\n", string(b))
-			}
-			if text, ok := content["text"].(string); ok && text != "" {
-				preview := text
-				if len(preview) > 200 {
-					preview = preview[:200] + "..."
-				}
-				fmt.Printf("  text=%q\n", preview)
-			}
-		} else if raw["type"] != nil {
-			b, _ := json.Marshal(raw)
-			if len(b) > 500 {
-				b = append(b[:500], []byte("...")...)
-			}
-			fmt.Printf("event=%s\n", string(b))
-		}
+		printStreamSummary(scanner.Text())
 	}
 }
 

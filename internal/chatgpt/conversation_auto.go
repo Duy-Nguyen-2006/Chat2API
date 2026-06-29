@@ -3,6 +3,7 @@ package chatgpt
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,12 @@ type streamRelay struct {
 	approval       *pendingApproval
 	done           bool
 	conversationID string
+	relayed        int
+}
+
+func writeStreamError(err error) []byte {
+	payload, _ := json.Marshal(map[string]string{"error": err.Error()})
+	return []byte(sseDataPrefix + string(payload) + "\n\n")
 }
 
 func (c *Client) ConversationAutoApprove(ctx context.Context, req ChatRequest) (*http.Response, error) {
@@ -24,7 +31,7 @@ func (c *Client) ConversationAutoApprove(ctx context.Context, req ChatRequest) (
 	go func() {
 		defer pw.Close()
 		if err := c.runAutoApproveLoop(ctx, req, pw); err != nil {
-			_, _ = pw.Write([]byte("data: " + fmt.Sprintf(`{"error":"%s"}`, err.Error()) + "\n\n"))
+			_, _ = pw.Write(writeStreamError(err))
 		}
 		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
 	}()
@@ -51,6 +58,11 @@ func (c *Client) runAutoApproveLoop(ctx context.Context, req ChatRequest, out io
 		if err != nil {
 			return err
 		}
+		if resp.StatusCode >= 400 {
+			msg := ReadErrorBody(resp)
+			resp.Body.Close()
+			return fmt.Errorf("conversation HTTP %d: %s", resp.StatusCode, msg)
+		}
 
 		relay, err := relayConversationStream(resp.Body, out)
 		resp.Body.Close()
@@ -64,17 +76,21 @@ func (c *Client) runAutoApproveLoop(ctx context.Context, req ChatRequest, out io
 		if relay.approval != nil {
 			parentMessageID = relay.approval.TargetMessageID
 			current = ChatRequest{
-				Model:          req.Model,
-				GizmoID:        req.GizmoID,
-				ConversationID: conversationID,
+				Model:           req.Model,
+				GizmoID:         req.GizmoID,
+				ConversationID:  conversationID,
 				ParentMessageID: parentMessageID,
-				Messages:       nil,
-				ApprovalOnly:   relay.approval,
+				Messages:        nil,
+				SaveChatHistory: req.SaveChatHistory,
+				ApprovalOnly:    relay.approval,
 			}
 			continue
 		}
 		if relay.done {
 			return nil
+		}
+		if relay.relayed == 0 {
+			return fmt.Errorf("conversation stream ended without assistant content")
 		}
 		return nil
 	}
@@ -111,6 +127,7 @@ func relayConversationStream(body io.Reader, out io.Writer) (streamRelay, error)
 		if _, err := io.WriteString(out, line+"\n\n"); err != nil {
 			return result, err
 		}
+		result.relayed++
 	}
 	result.conversationID = conversationID
 	return result, scanner.Err()

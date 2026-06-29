@@ -13,6 +13,7 @@ func withEnv(t *testing.T, kv map[string]string) {
 	t.Setenv("CHATGPT_ACCESS_TOKEN", "")
 	t.Setenv("CHATGPT_ACCOUNT_ID", "")
 	t.Setenv("COOKIES_FILE", "")
+	t.Setenv("AUTH_DIR", "")
 	t.Setenv("ACCOUNTS_FILE", "")
 	t.Setenv("REFRESH_ACCOUNT_INTERVAL_MIN", "")
 	t.Setenv("IMAGE_ACCOUNT_CONCURRENCY", "")
@@ -25,6 +26,7 @@ func withEnv(t *testing.T, kv map[string]string) {
 	t.Setenv("STORAGE_DIR", "")
 	t.Setenv("SQLITE_PATH", "")
 	t.Setenv("AUTO_APPROVE_TOOLS", "")
+	t.Setenv("SAVE_CHAT_HISTORY", "")
 
 	for k, v := range kv {
 		t.Setenv(k, v)
@@ -41,8 +43,11 @@ func TestLoadDefaults(t *testing.T) {
 	if c.Port != 8080 {
 		t.Errorf("Port: want 8080, got %d", c.Port)
 	}
-	if c.CookiesFile != "cookies_1.json" {
+	if c.CookiesFile != "auth/cookies_1.json" {
 		t.Errorf("CookiesFile default: got %q", c.CookiesFile)
+	}
+	if c.AuthDir != "auth" {
+		t.Errorf("AuthDir default: got %q", c.AuthDir)
 	}
 	if c.AccountsFile != "accounts.json" {
 		t.Errorf("AccountsFile default: got %q", c.AccountsFile)
@@ -61,6 +66,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !c.AutoApproveTools {
 		t.Error("AutoApproveTools default should be true")
+	}
+	if !c.SaveChatHistory {
+		t.Error("SaveChatHistory default should be true")
 	}
 	if c.AutoRemoveInvalid {
 		t.Error("AutoRemoveInvalid default should be false")
@@ -91,57 +99,37 @@ func TestLoadFromEnv(t *testing.T) {
 		"AUTO_APPROVE_TOOLS":           "false",
 	})
 	c := Load()
+	assertEnvConfig(t, c)
+}
 
-	if c.Host != "0.0.0.0" {
-		t.Errorf("Host: got %q", c.Host)
+func assertEnvConfig(t *testing.T, c Config) {
+	t.Helper()
+	cases := []struct {
+		name string
+		ok   bool
+	}{
+		{"Host", c.Host == "0.0.0.0"},
+		{"Port", c.Port == 9090},
+		{"ChatGPTToken", c.ChatGPTToken == "tok-abc"},
+		{"ChatGPTAccountID", c.ChatGPTAccountID == "acc-xyz"},
+		{"CookiesFile", c.CookiesFile == "custom.json"},
+		{"AccountsFile", c.AccountsFile == "accs.json"},
+		{"RefreshIntervalMin", c.RefreshIntervalMin == 10},
+		{"ImageConcurrency", c.ImageConcurrency == 5},
+		{"AutoRemoveInvalid", c.AutoRemoveInvalid},
+		{"AutoRelogin", c.AutoRelogin},
+		{"Proxy", c.Proxy == "http://127.0.0.1:8888"},
+		{"AuthKey", c.AuthKey == "secret"},
+		{"DisableAuth", c.DisableAuth},
+		{"StorageType", c.StorageType == "sqlite"},
+		{"StorageDir", c.StorageDir == "var/data"},
+		{"SQLitePath", c.SQLitePath == "var/db.sqlite"},
+		{"AutoApproveTools", !c.AutoApproveTools},
 	}
-	if c.Port != 9090 {
-		t.Errorf("Port: got %d", c.Port)
-	}
-	if c.ChatGPTToken != "tok-abc" {
-		t.Errorf("ChatGPTToken: got %q", c.ChatGPTToken)
-	}
-	if c.ChatGPTAccountID != "acc-xyz" {
-		t.Errorf("ChatGPTAccountID: got %q", c.ChatGPTAccountID)
-	}
-	if c.CookiesFile != "custom.json" {
-		t.Errorf("CookiesFile: got %q", c.CookiesFile)
-	}
-	if c.AccountsFile != "accs.json" {
-		t.Errorf("AccountsFile: got %q", c.AccountsFile)
-	}
-	if c.RefreshIntervalMin != 10 {
-		t.Errorf("RefreshIntervalMin: got %d", c.RefreshIntervalMin)
-	}
-	if c.ImageConcurrency != 5 {
-		t.Errorf("ImageConcurrency: got %d", c.ImageConcurrency)
-	}
-	if !c.AutoRemoveInvalid {
-		t.Error("AutoRemoveInvalid should be true")
-	}
-	if !c.AutoRelogin {
-		t.Error("AutoRelogin should be true")
-	}
-	if c.Proxy != "http://127.0.0.1:8888" {
-		t.Errorf("Proxy: got %q", c.Proxy)
-	}
-	if c.AuthKey != "secret" {
-		t.Errorf("AuthKey: got %q", c.AuthKey)
-	}
-	if !c.DisableAuth {
-		t.Error("DisableAuth should be true")
-	}
-	if c.StorageType != "sqlite" {
-		t.Errorf("StorageType should lowercase: got %q", c.StorageType)
-	}
-	if c.StorageDir != "var/data" {
-		t.Errorf("StorageDir: got %q", c.StorageDir)
-	}
-	if c.SQLitePath != "var/db.sqlite" {
-		t.Errorf("SQLitePath: got %q", c.SQLitePath)
-	}
-	if c.AutoApproveTools {
-		t.Error("AutoApproveTools should be false")
+	for _, tc := range cases {
+		if !tc.ok {
+			t.Errorf("%s: unexpected value from Load()", tc.name)
+		}
 	}
 }
 

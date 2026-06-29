@@ -17,3 +17,5 @@ data/
 config.json
 accounts.json
 auth_keys.json
+auth/*.json
+.scannerwork/

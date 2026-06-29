@@ -15,6 +15,7 @@ type Config struct {
 	ChatGPTToken     string
 	ChatGPTAccountID string
 	CookiesFile      string
+	AuthDir          string // folder of cookies_*.json exports for login
 
 	// Account pool configuration.
 	AccountsFile        string // accounts.json (pool persistence)
@@ -33,6 +34,8 @@ type Config struct {
 
 	// Backend behaviour.
 	AutoApproveTools bool
+	// When true, conversations are saved to chatgpt.com history (sidebar).
+	SaveChatHistory bool
 }
 
 func Load() Config {
@@ -52,6 +55,10 @@ func Load() Config {
 	if v := os.Getenv("AUTO_APPROVE_TOOLS"); v != "" {
 		autoApprove = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 	}
+	saveHistory := true
+	if v := os.Getenv("SAVE_CHAT_HISTORY"); v != "" {
+		saveHistory = v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	}
 
 	refreshInterval := envInt("REFRESH_ACCOUNT_INTERVAL_MIN", 5)
 	imageConcurrency := envInt("IMAGE_ACCOUNT_CONCURRENCY", 3)
@@ -61,7 +68,8 @@ func Load() Config {
 		Port:               port,
 		ChatGPTToken:       os.Getenv("CHATGPT_ACCESS_TOKEN"),
 		ChatGPTAccountID:   os.Getenv("CHATGPT_ACCOUNT_ID"),
-		CookiesFile:        envOr("COOKIES_FILE", "cookies_1.json"),
+		CookiesFile:        envOr("COOKIES_FILE", "auth/cookies_1.json"),
+		AuthDir:            envOr("AUTH_DIR", "auth"),
 		AccountsFile:       envOr("ACCOUNTS_FILE", "accounts.json"),
 		RefreshIntervalMin: refreshInterval,
 		ImageConcurrency:   imageConcurrency,
@@ -74,6 +82,7 @@ func Load() Config {
 		StorageDir:         envOr("STORAGE_DIR", "data"),
 		SQLitePath:         os.Getenv("SQLITE_PATH"),
 		AutoApproveTools:   autoApprove,
+		SaveChatHistory:    saveHistory,
 	}
 }
 
